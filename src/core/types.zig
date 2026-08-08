@@ -32,9 +32,11 @@ pub const HashTable = struct {
     buckets: []?*Item,
 };
 
+pub const HashValue = struct { hash: u64 };
+
 pub const HashFunc = struct {
     ptr: *anyopaque,
-    hash: *const fn (self: *anyopaque, key: []u8) u64,
+    hash: *const fn (self: *anyopaque, key: []u8) HashValue,
 };
 
 test "check item size" {

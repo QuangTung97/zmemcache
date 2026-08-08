@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const lock_manager = @import("lock_manager.zig");
 
 const ISlabService = struct {
     ptr: *anyopaque,
@@ -16,5 +17,6 @@ const ItemService = struct {
 test {
     _ = .{
         types,
+        lock_manager,
     };
 }

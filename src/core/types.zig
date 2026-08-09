@@ -39,6 +39,8 @@ pub fn HashFunc(T: type) type {
     };
 }
 
+pub const SlabClass = struct { slab: u32 };
+
 test "check item size" {
     try std.testing.expectEqual(1, @sizeOf(ItemFlags));
     try std.testing.expectEqual(8, @sizeOf(CasNum));

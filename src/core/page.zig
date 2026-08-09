@@ -96,8 +96,8 @@ pub const GlobalPager = struct {
 };
 
 const ItemIterator = struct {
-    item_size_shift: u64,
-    page_addr: *u8,
+    item_size: u64,
+    page_addr: [*]u8,
     current: u64,
     max_offset: u64,
 
@@ -108,7 +108,7 @@ const ItemIterator = struct {
             return null;
         }
 
-        const item_addr = self.page_addr + (self.current * self.item_size_shift);
+        const item_addr = self.page_addr + (self.current * self.item_size);
         self.current = self.current + 1;
 
         const item: *types.Item = @ptrCast(@alignCast(item_addr));
@@ -116,12 +116,14 @@ const ItemIterator = struct {
     }
 };
 
-pub fn iterateItemsOfPage(page: *Page, item_size_shift: u64) ItemIterator {
-    const item_size = 1 << item_size_shift;
+pub fn iterateItemsOfPage(page: *Page, item_size: u64) ItemIterator {
+    std.debug.assertAligned(page, types.ItemAlignment);
+    std.debug.assert(item_size % types.ItemAlignment.toByteUnits() == 0);
+
     const num_items = PageSize / item_size;
 
     return .{
-        .item_size_shift = item_size_shift,
+        .item_size = item_size,
         .page_addr = @ptrCast(page),
         .current = 0,
         .max_offset = num_items,
@@ -178,4 +180,18 @@ test "basic" {
 
     const item3: *types.Item = @ptrCast(@alignCast(p3));
     try expectEqual(2, g.getPageNumOfItem(item3).page_num);
+
+    // test iterate
+    const page1 = p1.?;
+    var it = iterateItemsOfPage(page1, 3 * 1024);
+    var counter: u64 = 0;
+    const base_addr: *u8 = &page1[0];
+    while (it.next()) |x| {
+        const item_addr: *u8 = @ptrCast(x);
+        // check offset
+        try expectEqual(3 * 1024 * counter, item_addr - base_addr);
+        counter = counter + 1;
+    }
+
+    try expectEqual(341, counter); // check total
 }

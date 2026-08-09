@@ -1,7 +1,7 @@
 const types = @import("types.zig");
 const page = @import("page.zig");
 const lock_manager = @import("lock_manager.zig");
-const slab_service = @import("slab_service.zig");
+const lru_service = @import("lru_service.zig");
 const item_service = @import("item_service.zig");
 
 test {
@@ -9,7 +9,7 @@ test {
         types,
         page,
         lock_manager,
-        slab_service,
+        lru_service,
         item_service,
     };
 }

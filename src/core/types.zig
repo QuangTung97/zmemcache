@@ -34,10 +34,16 @@ pub const HashValue = struct { hash: u64 };
 
 pub fn HashFunc(T: type) type {
     return struct {
-        self: *T,
         private: struct {
+            self: *T,
             hash: *const fn (self: *T, key: []const u8) HashValue,
         },
+
+        const Self = @This();
+
+        pub fn hashKey(self: Self, key: []const u8) HashValue {
+            return self.private.hash(self.private.self, key);
+        }
     };
 }
 

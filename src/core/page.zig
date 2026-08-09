@@ -74,7 +74,7 @@ pub const GlobalPager = struct {
         this.num_empty_pages.store(num_empty - 1, .seq_cst);
 
         const index = this.all_pages.len - num_empty;
-        const page_num = PageNum{.page_num = index};
+        const page_num = PageNum{ .page_num = index };
         self.updatePageSlab(page_num, slab);
 
         return &this.all_pages[index];

@@ -34,10 +34,9 @@ pub const HashTable = struct {
 
 pub const HashValue = struct { hash: u64 };
 
-pub const HashFunc = struct {
-    ptr: *anyopaque,
-    hash: *const fn (self: *anyopaque, key: []u8) HashValue,
-};
+pub fn HashFunc(T: type) type {
+    return fn (self: *T, key: []u8) HashValue;
+}
 
 test "check item size" {
     try std.testing.expectEqual(1, @sizeOf(ItemFlags));

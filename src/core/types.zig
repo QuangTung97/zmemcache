@@ -28,6 +28,8 @@ pub const Item = struct {
 
 pub const ItemSize = @sizeOf(Item);
 
+pub const ItemAlignment = std.mem.Alignment.fromByteUnits(@alignOf(Item));
+
 pub const HashValue = struct { hash: u64 };
 
 pub fn HashFunc(T: type) type {
@@ -41,8 +43,11 @@ pub fn HashFunc(T: type) type {
 
 pub const SlabClass = struct { slab: u32 };
 
+const expectEqual = std.testing.expectEqual;
+
 test "check item size" {
-    try std.testing.expectEqual(1, @sizeOf(ItemFlags));
-    try std.testing.expectEqual(8, @sizeOf(CasNum));
-    try std.testing.expectEqual(8 * 6, ItemSize);
+    try expectEqual(1, @sizeOf(ItemFlags));
+    try expectEqual(8, @sizeOf(CasNum));
+    try expectEqual(8 * 6, ItemSize);
+    try expectEqual(std.mem.Alignment.@"8", ItemAlignment);
 }

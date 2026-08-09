@@ -3,8 +3,8 @@ const types = @import("types.zig");
 
 pub fn ILockManager(T: type) type {
     return struct {
-        self: *T,
         private: struct {
+            self: *T,
             lock: *const fn (self: *T, hash: types.HashValue) void,
             tryLock: *const fn (self: *T, hash: types.HashValue) bool,
             unlock: *const fn (self: *T, hash: types.HashValue) void,
@@ -13,23 +13,26 @@ pub fn ILockManager(T: type) type {
         const Self = @This();
 
         pub fn lock(self: Self, hash: types.HashValue) void {
-            self.private.lock(self.self, hash);
+            const obj = self.private.self;
+            self.private.lock(obj, hash);
         }
 
         pub fn tryLock(self: Self, hash: types.HashValue) bool {
-            return self.private.tryLock(self.self, hash);
+            const obj = self.private.self;
+            return self.private.tryLock(obj, hash);
         }
 
         pub fn unlock(self: Self, hash: types.HashValue) void {
-            self.private.unlock(self.self, hash);
+            const obj = self.private.self;
+            self.private.unlock(obj, hash);
         }
     };
 }
 
 pub fn NewILockManager(T: type, obj: *T) ILockManager(T) {
     return ILockManager(T){
-        .self = obj,
         .private = .{
+            .self = obj,
             .lock = T.lock,
             .tryLock = T.tryLock,
             .unlock = T.unlock,
@@ -114,5 +117,9 @@ test "fake lock manager" {
         LockAction{ .action = .tryLock, .hash = 13 },
         LockAction{ .action = .unlock, .hash = 11 },
     };
-    try std.testing.expectEqualSlices(LockAction, expectedActions[0..], m.self.actions.items);
+    try std.testing.expectEqualSlices(
+        LockAction,
+        expectedActions[0..],
+        m.private.self.actions.items,
+    );
 }

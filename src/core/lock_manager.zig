@@ -3,16 +3,14 @@ const types = @import("types.zig");
 
 pub fn ILockManager(T: type) type {
     return struct {
-        self: *T,
-        lock: *const fn (self: *T, hash: types.HashValue) void,
-        tryLock: *const fn (self: *T, hash: types.HashValue) bool,
-        unlock: *const fn (self: *T, hash: types.HashValue) void,
+        lock: fn (self: *T, hash: types.HashValue) void,
+        tryLock: fn (self: *T, hash: types.HashValue) bool,
+        unlock: fn (self: *T, hash: types.HashValue) void,
     };
 }
 
-pub fn NewILockManager(T: type, obj: *T) ILockManager(T) {
+pub fn NewILockManager(T: type) ILockManager(T) {
     return ILockManager(T){
-        .self = obj,
         .lock = T.lock,
         .tryLock = T.tryLock,
         .unlock = T.unlock,
@@ -49,16 +47,16 @@ const expectEqual = std.testing.expectEqual;
 
 test "fake lock manager" {
     var obj = FakeLockManager.init(std.testing.allocator);
-    const m = NewILockManager(FakeLockManager, &obj);
+    const m = NewILockManager(FakeLockManager);
 
-    m.lock(m.self, .{ .hash = 11 });
-    m.lock(m.self, .{ .hash = 12 });
+    m.lock(&obj, .{ .hash = 11 });
+    m.lock(&obj, .{ .hash = 12 });
 
-    const ok = m.tryLock(m.self, .{ .hash = 12 });
+    const ok = m.tryLock(&obj, .{ .hash = 12 });
     try expectEqual(true, ok);
 
-    m.unlock(m.self, .{ .hash = 11 });
+    m.unlock(&obj, .{ .hash = 11 });
 
     const expectedActions = [_]LockAction{};
-    try expectEqual(expectedActions[0..], m.self.actions.items);
+    try expectEqual(expectedActions[0..], obj.actions.items);
 }

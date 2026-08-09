@@ -61,6 +61,7 @@ pub const GlobalPager = struct {
             return null;
         }
 
+        // lock the mutex
         this.mut.lockUncancelable(this.io);
         defer this.mut.unlock(this.io);
 
@@ -73,7 +74,8 @@ pub const GlobalPager = struct {
         this.num_empty_pages.store(num_empty - 1, .seq_cst);
 
         const index = this.all_pages.len - num_empty;
-        this.pages_to_slab[index].store(slab.slab, .seq_cst);
+        const page_num = PageNum{.page_num = index};
+        self.updatePageSlab(page_num, slab);
 
         return &this.all_pages[index];
     }
@@ -86,6 +88,12 @@ pub const GlobalPager = struct {
 
         const page_num = offset >> PageSizeShift;
         return .{ .page_num = page_num };
+    }
+
+    pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: types.SlabClass) void {
+        const this = &self.private;
+        std.debug.assert(page_num.page_num < this.all_pages.len);
+        this.pages_to_slab[page_num.page_num].store(slab.slab, .seq_cst);
     }
 
     pub fn getSlabClass(self: Self, page_num: PageNum) types.SlabClass {

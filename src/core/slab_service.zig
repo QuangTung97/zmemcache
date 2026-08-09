@@ -2,16 +2,22 @@ const types = @import("types.zig");
 
 pub fn ISlabService(T: type) type {
     return struct {
-        putItem: fn (self: *T, item: *types.Item) void,
-        touchItem: fn (self: *T, item: *types.Item) void,
-        deleteItem: fn (self: *T, item: *types.Item) void,
+        self: *T,
+        private: struct {
+            putItem: *const fn (self: *T, item: *types.Item) void,
+            touchItem: *const fn (self: *T, item: *types.Item) void,
+            deleteItem: *const fn (self: *T, item: *types.Item) void,
+        },
     };
 }
 
-pub fn NewISlabService(T: type) ISlabService(T) {
+pub fn NewISlabService(T: type, obj: *T) ISlabService(T) {
     return ISlabService(T){
-        .putItem = T.putItem,
-        .touchItem = T.touchItem,
-        .deleteItem = T.deleteItem,
+        .self = obj,
+        .private = .{
+            .putItem = T.putItem,
+            .touchItem = T.touchItem,
+            .deleteItem = T.deleteItem,
+        },
     };
 }

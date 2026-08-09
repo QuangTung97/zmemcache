@@ -3,17 +3,37 @@ const types = @import("types.zig");
 
 pub fn ILockManager(T: type) type {
     return struct {
-        lock: fn (self: *T, hash: types.HashValue) void,
-        tryLock: fn (self: *T, hash: types.HashValue) bool,
-        unlock: fn (self: *T, hash: types.HashValue) void,
+        self: *T,
+        private: struct {
+            lock: *const fn (self: *T, hash: types.HashValue) void,
+            tryLock: *const fn (self: *T, hash: types.HashValue) bool,
+            unlock: *const fn (self: *T, hash: types.HashValue) void,
+        },
+
+        const Self = @This();
+
+        pub fn lock(self: Self, hash: types.HashValue) void {
+            self.private.lock(self.self, hash);
+        }
+
+        pub fn tryLock(self: Self, hash: types.HashValue) bool {
+            return self.private.tryLock(self.self, hash);
+        }
+
+        pub fn unlock(self: Self, hash: types.HashValue) void {
+            self.private.unlock(self.self, hash);
+        }
     };
 }
 
-pub fn NewILockManager(T: type) ILockManager(T) {
+pub fn NewILockManager(T: type, obj: *T) ILockManager(T) {
     return ILockManager(T){
-        .lock = T.lock,
-        .tryLock = T.tryLock,
-        .unlock = T.unlock,
+        .self = obj,
+        .private = .{
+            .lock = T.lock,
+            .tryLock = T.tryLock,
+            .unlock = T.unlock,
+        },
     };
 }
 
@@ -78,15 +98,15 @@ test "fake lock manager" {
     var obj = FakeLockManager.init(std.testing.allocator);
     defer obj.deinit();
 
-    const m = NewILockManager(FakeLockManager);
+    const m = NewILockManager(FakeLockManager, &obj);
 
-    m.lock(&obj, .{ .hash = 11 });
-    m.lock(&obj, .{ .hash = 12 });
+    m.lock(.{ .hash = 11 });
+    m.lock(.{ .hash = 12 });
 
-    const ok = m.tryLock(&obj, .{ .hash = 13 });
+    const ok = m.tryLock(.{ .hash = 13 });
     try expectEqual(true, ok);
 
-    m.unlock(&obj, .{ .hash = 11 });
+    m.unlock(.{ .hash = 11 });
 
     const expectedActions = [_]LockAction{
         LockAction{ .action = .lock, .hash = 11 },
@@ -94,5 +114,5 @@ test "fake lock manager" {
         LockAction{ .action = .tryLock, .hash = 13 },
         LockAction{ .action = .unlock, .hash = 11 },
     };
-    try std.testing.expectEqualSlices(LockAction, expectedActions[0..], obj.actions.items);
+    try std.testing.expectEqualSlices(LockAction, expectedActions[0..], m.self.actions.items);
 }

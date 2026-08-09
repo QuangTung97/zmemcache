@@ -31,7 +31,12 @@ pub const ItemSize = @sizeOf(Item);
 pub const HashValue = struct { hash: u64 };
 
 pub fn HashFunc(T: type) type {
-    return fn (self: *T, key: []u8) HashValue;
+    return struct {
+        self: *T,
+        private: struct {
+            hash: *const fn (self: *T, key: []const u8) HashValue,
+        },
+    };
 }
 
 test "check item size" {

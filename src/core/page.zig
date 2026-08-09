@@ -95,6 +95,39 @@ pub const GlobalPager = struct {
     }
 };
 
+const ItemIterator = struct {
+    item_size_shift: u64,
+    page_addr: *u8,
+    current: u64,
+    max_offset: u64,
+
+    const Self = @This();
+
+    pub fn next(self: *Self) ?*types.Item {
+        if (self.current >= self.max_offset) {
+            return null;
+        }
+
+        const item_addr = self.page_addr + (self.current * self.item_size_shift);
+        self.current = self.current + 1;
+
+        const item: *types.Item = @ptrCast(@alignCast(item_addr));
+        return item;
+    }
+};
+
+pub fn iterateItemsOfPage(page: *Page, item_size_shift: u64) ItemIterator {
+    const item_size = 1 << item_size_shift;
+    const num_items = PageSize / item_size;
+
+    return .{
+        .item_size_shift = item_size_shift,
+        .page_addr = @ptrCast(page),
+        .current = 0,
+        .max_offset = num_items,
+    };
+}
+
 const expectEqual = std.testing.expectEqual;
 
 test "page size" {

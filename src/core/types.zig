@@ -28,10 +28,6 @@ pub const Item = struct {
 
 pub const ItemSize = @sizeOf(Item);
 
-pub const HashTable = struct {
-    buckets: []?*Item,
-};
-
 pub const HashValue = struct { hash: u64 };
 
 pub fn HashFunc(T: type) type {

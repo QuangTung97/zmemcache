@@ -1,22 +1,15 @@
-const std = @import("std");
 const types = @import("types.zig");
+const page = @import("page.zig");
 const lock_manager = @import("lock_manager.zig");
-
-const ISlabService = struct {
-    ptr: *anyopaque,
-
-    putItem: *const fn (item: *types.Item) void,
-    touchItem: *const fn (item: *types.Item) void,
-    deleteItem: *const fn (item: *types.Item) void,
-};
-
-const ItemService = struct {
-    hash_fn: types.HashFunc,
-};
+const slab_service = @import("slab_service.zig");
+const item_service = @import("item_service.zig");
 
 test {
     _ = .{
         types,
+        page,
         lock_manager,
+        slab_service,
+        item_service,
     };
 }

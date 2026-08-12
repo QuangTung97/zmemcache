@@ -1,7 +1,6 @@
 const std = @import("std");
 
 pub const ItemFlags = packed struct {
-    present: bool,
     is_deleting: bool,
     set_partial: bool,
 };
@@ -11,19 +10,22 @@ pub const RefCount = struct { refcount: u32 };
 pub const CasNum = struct { cas: u64 };
 
 pub const Item = struct {
-    flags: ItemFlags,
-    key_len: u8,
-    is_touched: std.atomic.Value(bool),
+    is_present: bool, // protected by slab lock
+    flags: ItemFlags, // protected by item lock
+    key_len: u8, // constant
+    is_active: std.atomic.Value(bool), // set = true when touched
 
-    refcount: RefCount,
-    value_len: u32,
+    refcount: RefCount, // protected by item lock
+    value_len: u32, // constant
 
-    hash_next: ?*Item,
+    hash_next: ?*Item, // protected by item lock
 
-    lru_next: *Item,
-    lru_prev: *Item,
+    lru_next: *Item, // protected by slab lock
+    lru_prev: *Item, // protected by slab lock
 
-    cas_num: CasNum,
+    cas_num: CasNum, // protected by item lock
+
+    // key data & item data are protected by item lock
 };
 
 pub const ItemSize = @sizeOf(Item);

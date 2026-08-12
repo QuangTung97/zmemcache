@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
-const lock_manager = @import("lock_manager.zig");
-const lru_service = @import("lru_service.zig");
+const zlock = @import("item_lock.zig");
+const zlru = @import("lru_service.zig");
 const zpage = @import("page.zig");
 
 const Allocator = std.mem.Allocator;
@@ -40,22 +40,28 @@ pub const ItemGetter = union(enum) {
     NotFound: struct {},
 };
 
-pub fn ItemService(H: type, L: type, S: type) type {
+pub fn ItemService(
+    H: type,
+    L: type,
+    S: type,
+    item_locks: zlock.ItemLockFuncs(L),
+) type {
     return struct {
         hash: types.HashFunc(H),
-        locker: lock_manager.ILockManager(L),
-        lru_svc: lru_service.ILruService(S),
+        locker: *L,
+        lru_svc: zlru.ILruService(S),
 
         pager: *zpage.GlobalPager,
         table: HashTable,
 
         const Self = @This();
+        const ItemLocks = item_locks;
 
         pub fn init(
             gpa: std.mem.Allocator,
             hash_func: types.HashFunc(H),
-            locker: lock_manager.ILockManager(L),
-            lru_svc: lru_service.ILruService(S),
+            locker: *L,
+            lru_svc: zlru.ILruService(S),
             pager: *zpage.GlobalPager,
             hash_size_log: u6,
         ) !Self {
@@ -76,10 +82,10 @@ pub fn ItemService(H: type, L: type, S: type) type {
 
         pub fn put(self: *Self, key: []const u8) ?ItemSetter {
             const hash_value = self.hash.hashKey(key);
-            const lock_slot = self.locker.getSlot(hash_value);
+            const lock_slot = ItemLocks.getSlot(self.locker, hash_value);
 
-            self.locker.lock(lock_slot);
-            defer self.locker.unlock(lock_slot);
+            ItemLocks.lock(self.locker, lock_slot);
+            defer ItemLocks.unlock(self.locker, lock_slot);
 
             const item_size = 128; // TODO
             const slab = types.SlabClass{ .slab = 11 }; // TODO
@@ -153,16 +159,17 @@ test "hash table" {
 const ServiceTest = struct {
     const ServiceType = ItemService(
         types.FakeHashFunc,
-        lock_manager.FakeLockManager,
-        lru_service.FakeLruService,
+        zlock.FakeItemLocks,
+        zlru.FakeLruService,
+        zlock.NewItemLockFuncs(zlock.FakeItemLocks),
     );
     const Self = @This();
 
     gpa: Allocator,
     hash_func: types.FakeHashFunc,
     pager: zpage.GlobalPager,
-    locker: lock_manager.FakeLockManager,
-    lru_svc: lru_service.FakeLruService,
+    locker: zlock.FakeItemLocks,
+    lru_svc: zlru.FakeLruService,
     svc: ServiceType,
 
     fn init() !*Self {
@@ -174,14 +181,14 @@ const ServiceTest = struct {
         s.gpa = gpa;
         s.hash_func = types.FakeHashFunc.init(gpa);
         s.pager = try zpage.GlobalPager.init(io, gpa, 3);
-        s.locker = lock_manager.FakeLockManager.init(gpa);
-        s.lru_svc = lru_service.FakeLruService.init(gpa);
+        s.locker = zlock.FakeItemLocks.init(gpa);
+        s.lru_svc = zlru.FakeLruService.init(gpa);
 
         s.svc = try ServiceType.init(
             gpa,
             types.HashFunc(types.FakeHashFunc).init(&s.hash_func),
-            lock_manager.ILockManager(lock_manager.FakeLockManager).init(&s.locker),
-            lru_service.ILruService(lru_service.FakeLruService).init(&s.lru_svc),
+            &s.locker,
+            zlru.ILruService(zlru.FakeLruService).init(&s.lru_svc),
             &s.pager,
             5,
         );

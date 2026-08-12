@@ -14,6 +14,19 @@ pub fn ILockManager(T: type) type {
 
         const Self = @This();
 
+        pub fn init(obj: *T) Self {
+            return Self{
+                .private = .{
+                    .self = obj,
+                    .getSlot = T.getSlot,
+                    .isLocked = T.isLocked,
+                    .lock = T.lock,
+                    .tryLock = T.tryLock,
+                    .unlock = T.unlock,
+                },
+            };
+        }
+
         pub fn getSlot(self: Self, hash: types.HashValue) types.LockSlot {
             const obj = self.private.self;
             return self.private.getSlot(obj, hash);
@@ -41,19 +54,8 @@ pub fn ILockManager(T: type) type {
     };
 }
 
-pub fn NewILockManager(T: type, obj: *T) ILockManager(T) {
-    return ILockManager(T){
-        .private = .{
-            .self = obj,
-            .getSlot = T.getSlot,
-            .isLocked = T.isLocked,
-            .lock = T.lock,
-            .tryLock = T.tryLock,
-            .unlock = T.unlock,
-        },
-    };
-}
-
+// ===========================================================================
+// Fake Lock Manager
 // ===========================================================================
 
 const LockActionType = enum {
@@ -94,6 +96,7 @@ pub const FakeLockManager = struct {
     }
 
     pub fn lock(self: *Self, slot: types.LockSlot) void {
+        std.debug.assert(!self.lockedSet.contains(slot));
         self.lockedSet.put(slot, .{}) catch unreachable;
         self.actions.append(self.gpa, LockAction{
             .action = .lock,
@@ -106,7 +109,7 @@ pub const FakeLockManager = struct {
     }
 
     pub fn tryLock(self: *Self, slot: types.LockSlot) bool {
-        if (self.lockedSet.contains(slot))  {
+        if (self.lockedSet.contains(slot)) {
             return false;
         }
         self.lockedSet.put(slot, .{}) catch unreachable;
@@ -118,7 +121,8 @@ pub const FakeLockManager = struct {
     }
 
     pub fn unlock(self: *Self, slot: types.LockSlot) void {
-        _ = self.lockedSet.remove(slot);
+        const ok = self.lockedSet.remove(slot);
+        std.debug.assert(ok);
         self.actions.append(self.gpa, LockAction{
             .action = .unlock,
             .hash = slot.lock_slot,
@@ -134,7 +138,7 @@ test "fake lock manager" {
     var obj = FakeLockManager.init(std.testing.allocator);
     defer obj.deinit();
 
-    const m = NewILockManager(FakeLockManager, &obj);
+    const m = ILockManager(FakeLockManager).init(&obj);
     try expectEqual(types.NewLockSlot(81), m.getSlot(types.NewHash(81)));
 
     m.lock(types.NewLockSlot(11));

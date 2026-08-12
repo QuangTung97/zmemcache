@@ -5,26 +5,32 @@ pub fn ILockManager(T: type) type {
     return struct {
         private: struct {
             self: *T,
-            lock: *const fn (self: *T, hash: types.HashValue) void,
-            tryLock: *const fn (self: *T, hash: types.HashValue) bool,
-            unlock: *const fn (self: *T, hash: types.HashValue) void,
+            getSlot: *const fn (self: *T, hash: types.HashValue) types.LockSlot,
+            lock: *const fn (self: *T, slot: types.LockSlot) void,
+            tryLock: *const fn (self: *T, slot: types.LockSlot) bool,
+            unlock: *const fn (self: *T, slot: types.LockSlot) void,
         },
 
         const Self = @This();
 
-        pub fn lock(self: Self, hash: types.HashValue) void {
+        pub fn getSlot(self: Self, hash: types.HashValue) types.LockSlot {
             const obj = self.private.self;
-            self.private.lock(obj, hash);
+            return obj.private.getSlot(obj, hash);
         }
 
-        pub fn tryLock(self: Self, hash: types.HashValue) bool {
+        pub fn lock(self: Self, slot: types.LockSlot) void {
             const obj = self.private.self;
-            return self.private.tryLock(obj, hash);
+            self.private.lock(obj, slot);
         }
 
-        pub fn unlock(self: Self, hash: types.HashValue) void {
+        pub fn tryLock(self: Self, slot: types.LockSlot) bool {
             const obj = self.private.self;
-            self.private.unlock(obj, hash);
+            return self.private.tryLock(obj, slot);
+        }
+
+        pub fn unlock(self: Self, slot: types.LockSlot) void {
+            const obj = self.private.self;
+            self.private.unlock(obj, slot);
         }
     };
 }
@@ -33,6 +39,7 @@ pub fn NewILockManager(T: type, obj: *T) ILockManager(T) {
     return ILockManager(T){
         .private = .{
             .self = obj,
+            .getSlot = T.getSlot,
             .lock = T.lock,
             .tryLock = T.tryLock,
             .unlock = T.unlock,
@@ -70,25 +77,29 @@ pub const FakeLockManager = struct {
         self.actions.deinit(self.gpa);
     }
 
-    pub fn lock(self: *Self, hash: types.HashValue) void {
+    pub fn getSlot(_: *Self, hash: types.HashValue) types.LockSlot {
+        return types.LockSlot{ .lock_slot = hash.hash };
+    }
+
+    pub fn lock(self: *Self, slot: types.LockSlot) void {
         self.actions.append(self.gpa, LockAction{
             .action = .lock,
-            .hash = hash.hash,
+            .hash = slot.lock_slot,
         }) catch unreachable;
     }
 
-    pub fn tryLock(self: *Self, hash: types.HashValue) bool {
+    pub fn tryLock(self: *Self, slot: types.LockSlot) bool {
         self.actions.append(self.gpa, LockAction{
             .action = .tryLock,
-            .hash = hash.hash,
+            .hash = slot.lock_slot,
         }) catch unreachable;
         return true;
     }
 
-    pub fn unlock(self: *Self, hash: types.HashValue) void {
+    pub fn unlock(self: *Self, slot: types.LockSlot) void {
         self.actions.append(self.gpa, LockAction{
             .action = .unlock,
-            .hash = hash.hash,
+            .hash = slot.lock_slot,
         }) catch unreachable;
     }
 };
@@ -103,13 +114,13 @@ test "fake lock manager" {
 
     const m = NewILockManager(FakeLockManager, &obj);
 
-    m.lock(.{ .hash = 11 });
-    m.lock(.{ .hash = 12 });
+    m.lock(.{ .lock_slot = 11 });
+    m.lock(.{ .lock_slot = 12 });
 
-    const ok = m.tryLock(.{ .hash = 13 });
+    const ok = m.tryLock(.{ .lock_slot = 13 });
     try expectEqual(true, ok);
 
-    m.unlock(.{ .hash = 11 });
+    m.unlock(.{ .lock_slot = 11 });
 
     const expectedActions = [_]LockAction{
         LockAction{ .action = .lock, .hash = 11 },

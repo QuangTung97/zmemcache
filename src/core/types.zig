@@ -40,7 +40,7 @@ pub const Item = struct {
 
     fn getKeyAddr(self: *Self) [*]u8 {
         const base_addr: [*]u8 = @ptrCast(self);
-        return  base_addr + Size;
+        return base_addr + Size;
     }
 
     pub fn getKey(self: *Self) []u8 {
@@ -55,6 +55,8 @@ pub const Item = struct {
 };
 
 pub const HashValue = struct { hash: u64 };
+
+pub const LockSlot = struct { lock_slot: u64 };
 
 pub fn HashFunc(T: type) type {
     return struct {

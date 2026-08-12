@@ -92,7 +92,6 @@ test "lock & unlock" {
     var fake = FakeLruService.init(gpa);
     defer fake.deinit();
 
-    // const s = ILruService(FakeLruService).init(&fake);
     const s = NewLruFuncs(FakeLruService);
 
     const slab1 = Slab{ .slab = 21 };

@@ -74,29 +74,14 @@ pub const LockSlot = struct {
 
 pub const SlabClass = struct { slab: u32 };
 
-
 pub fn HashFunc(T: type) type {
     return struct {
-        private: struct {
-            self: *T,
-            hashKey: *const fn (self: *T, key: []const u8) HashValue,
-        },
-
-        const Self = @This();
-
-        pub fn init(obj: *T) Self {
-            return .{
-                .private = .{
-                    .self = obj,
-                    .hashKey = T.hashKey,
-                },
-            };
-        }
-
-        pub fn hashKey(self: Self, key: []const u8) HashValue {
-            return self.private.hashKey(self.private.self, key);
-        }
+        hashKey: fn (self: *T, key: []const u8) HashValue,
     };
+}
+
+pub fn NewHashFunc(T: type) HashFunc(T) {
+    return .{ .hashKey = T.hashKey };
 }
 
 // ===========================================================================
@@ -151,12 +136,12 @@ test "fake hash func" {
     var fake = FakeHashFunc.init(gpa);
     defer fake.deinit();
 
-    const s = HashFunc(FakeHashFunc).init(&fake);
+    const s = NewHashFunc(FakeHashFunc);
 
     const hash1 = HashValue.init(41);
     const key01 = "key01";
 
     fake.addKeyHash(key01, hash1);
 
-    try expectEqual(hash1, s.hashKey(key01));
+    try expectEqual(hash1, s.hashKey(&fake, key01));
 }

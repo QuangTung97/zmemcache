@@ -44,37 +44,39 @@ pub fn ItemService(
     H: type,
     L: type,
     S: type,
+    hash_func: types.HashFunc(H),
     item_locks: zlock.ItemLockFuncs(L),
     lru_funcs: zlru.LruFuncs(S),
 ) type {
     return struct {
-        hash: types.HashFunc(H),
+        hasher: *H,
+        pager: *zpage.GlobalPager,
         locker: *L,
         lru_svc: *S,
 
-        pager: *zpage.GlobalPager,
         table: HashTable,
 
         const Self = @This();
 
+        const HashFunc = hash_func;
         const ItemLocks = item_locks;
         const LruFuncs = lru_funcs;
 
         pub fn init(
             gpa: std.mem.Allocator,
-            hash_func: types.HashFunc(H),
+            hasher: *H,
+            pager: *zpage.GlobalPager,
             locker: *L,
             lru_svc: *S,
-            pager: *zpage.GlobalPager,
             hash_size_log: u6,
         ) !Self {
             const hash_table = try HashTable.init(gpa, hash_size_log);
 
             return .{
-                .hash = hash_func,
+                .hasher = hasher,
+                .pager = pager,
                 .locker = locker,
                 .lru_svc = lru_svc,
-                .pager = pager,
                 .table = hash_table,
             };
         }
@@ -84,7 +86,7 @@ pub fn ItemService(
         }
 
         pub fn put(self: *Self, key: []const u8) ?ItemSetter {
-            const hash_value = self.hash.hashKey(key);
+            const hash_value = HashFunc.hashKey(self.hasher, key);
             const lock_slot = ItemLocks.getSlot(self.locker, hash_value);
 
             ItemLocks.lock(self.locker, lock_slot);
@@ -164,6 +166,7 @@ const ServiceTest = struct {
         types.FakeHashFunc,
         zlock.FakeItemLocks,
         zlru.FakeLruService,
+        types.NewHashFunc(types.FakeHashFunc),
         zlock.NewItemLockFuncs(zlock.FakeItemLocks),
         zlru.NewLruFuncs(zlru.FakeLruService),
     );
@@ -190,10 +193,10 @@ const ServiceTest = struct {
 
         s.svc = try ServiceType.init(
             gpa,
-            types.HashFunc(types.FakeHashFunc).init(&s.hash_func),
+            &s.hash_func,
+            &s.pager,
             &s.locker,
             &s.lru_svc,
-            &s.pager,
             5,
         );
 

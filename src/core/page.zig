@@ -27,7 +27,7 @@ pub const GlobalPager = struct {
     pub fn init(io: std.Io, gpa: std.mem.Allocator, num_pages: u64) !Self {
         const all_pages = try gpa.alignedAlloc(
             Page,
-            types.ItemAlignment,
+            types.Item.Alignment,
             num_pages,
         );
         const pages_to_slab = try gpa.alloc(std.atomic.Value(u32), num_pages);
@@ -125,8 +125,8 @@ const ItemIterator = struct {
 };
 
 pub fn iterateItemsOfPage(page: *Page, item_size: u64) ItemIterator {
-    std.debug.assertAligned(page, types.ItemAlignment);
-    std.debug.assert(item_size % types.ItemAlignment.toByteUnits() == 0);
+    std.debug.assertAligned(page, types.Item.Alignment);
+    std.debug.assert(item_size % types.Item.Alignment.toByteUnits() == 0);
 
     const num_items = PageSize / item_size;
 

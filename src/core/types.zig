@@ -1,5 +1,12 @@
 const std = @import("std");
 
+pub const LruList = enum(u2) { Hot, Warm, Cold };
+
+pub const SlabFlags = packed struct {
+    is_present: bool,
+    lru_list: LruList,
+};
+
 pub const ItemFlags = packed struct {
     is_deleting: bool,
     set_partial: bool,
@@ -10,8 +17,8 @@ pub const RefCount = struct { refcount: u32 };
 pub const CasNum = struct { cas: u64 };
 
 pub const Item = struct {
-    is_present: bool, // protected by slab lock
-    flags: ItemFlags, // protected by item lock
+    slab_flags: SlabFlags, // protected by slab lock
+    item_flags: ItemFlags, // protected by item lock
     key_len: u8, // constant
     is_active: std.atomic.Value(bool), // set = true when touched
 
@@ -26,11 +33,11 @@ pub const Item = struct {
     cas_num: CasNum, // protected by item lock
 
     // key data & item data are protected by item lock
+
+    const Self = @This();
+    pub const Size = @sizeOf(Self);
+    pub const Alignment = std.mem.Alignment.fromByteUnits(@alignOf(Self));
 };
-
-pub const ItemSize = @sizeOf(Item);
-
-pub const ItemAlignment = std.mem.Alignment.fromByteUnits(@alignOf(Item));
 
 pub const HashValue = struct { hash: u64 };
 
@@ -54,8 +61,9 @@ pub const SlabClass = struct { slab: u32 };
 const expectEqual = std.testing.expectEqual;
 
 test "check item size" {
+    try expectEqual(1, @sizeOf(SlabFlags));
     try expectEqual(1, @sizeOf(ItemFlags));
     try expectEqual(8, @sizeOf(CasNum));
-    try expectEqual(8 * 6, ItemSize);
-    try expectEqual(std.mem.Alignment.@"8", ItemAlignment);
+    try expectEqual(8 * 6, Item.Size);
+    try expectEqual(std.mem.Alignment.@"8", Item.Alignment);
 }

@@ -56,7 +56,15 @@ pub const Item = struct {
 
 pub const HashValue = struct { hash: u64 };
 
+pub fn NewHash(x: u64) HashValue {
+    return .{ .hash = x };
+}
+
 pub const LockSlot = struct { lock_slot: u64 };
+
+pub fn NewLockSlot(x: u64) LockSlot {
+    return .{ .lock_slot = x };
+}
 
 pub fn HashFunc(T: type) type {
     return struct {

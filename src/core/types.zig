@@ -19,6 +19,10 @@ pub const RefCount = struct { refcount: u32 };
 pub const CasNum = struct { cas: u64 };
 
 pub const Item = struct {
+    const Self = @This();
+    pub const Size = @sizeOf(Self);
+    pub const Alignment = std.mem.Alignment.fromByteUnits(@alignOf(Self));
+
     slab_flags: SlabFlags, // protected by slab lock
     item_flags: ItemFlags, // protected by item lock
     key_len: u8, // constant
@@ -35,10 +39,6 @@ pub const Item = struct {
     cas_num: CasNum, // protected by item lock
 
     // key data & item data are protected by item lock
-
-    const Self = @This();
-    pub const Size = @sizeOf(Self);
-    pub const Alignment = std.mem.Alignment.fromByteUnits(@alignOf(Self));
 
     fn getKeyAddr(self: *Self) [*]u8 {
         const base_addr: [*]u8 = @ptrCast(self);

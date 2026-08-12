@@ -74,6 +74,15 @@ pub fn ItemService(H: type, L: type, S: type) type {
             self.table.deinit();
         }
 
+        const IterateAndPushFreeListCtx = struct {
+            self: *Self,
+            slab: types.SlabClass,
+            fn yield(ctx: *@This(), item: *Item) !bool {
+                ctx.self.lru_svc.putFreeItem(ctx.slab, item);
+                return true;
+            }
+        };
+
         pub fn put(self: *Self, key: []const u8) ?ItemSetter {
             const hash_value = self.hash.hashKey(key);
             const lock_slot = self.locker.getSlot(hash_value);
@@ -89,15 +98,22 @@ pub fn ItemService(H: type, L: type, S: type) type {
 
             // TODO get from free list first
 
+            std.debug.assert(self.lru_svc.isSlabLocked(slab));
             const null_page = self.pager.allocPage(slab);
             const page = if (null_page) |p| p else {
                 return null;
             };
 
-            var item_iter = zpage.iterateItemsOfPage(page, item_size);
-            while (item_iter.next()) |it| {
-                self.lru_svc.putFreeItem(slab, it);
-            }
+            var ctx = IterateAndPushFreeListCtx{
+                .self = self,
+                .slab = slab,
+            };
+            zpage.iterateItemsOfPage(
+                page,
+                item_size,
+                &ctx,
+                IterateAndPushFreeListCtx.yield,
+            ) catch unreachable;
 
             const null_item = self.lru_svc.getFreeItem(slab);
             const result_item = if (null_item) |it| it else {

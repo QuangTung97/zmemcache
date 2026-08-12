@@ -1,6 +1,8 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+const Item = types.Item;
+
 const PageSizeShift = 20;
 
 pub const PageSize = 1 << PageSizeShift; // 1MB
@@ -27,7 +29,7 @@ pub const GlobalPager = struct {
     pub fn init(io: std.Io, gpa: std.mem.Allocator, num_pages: u64) !Self {
         const all_pages = try gpa.alignedAlloc(
             Page,
-            types.Item.Alignment,
+            Item.Alignment,
             num_pages,
         );
         const pages_to_slab = try gpa.alloc(std.atomic.Value(u32), num_pages);
@@ -80,7 +82,7 @@ pub const GlobalPager = struct {
         return &this.all_pages[index];
     }
 
-    pub fn getPageNumOfItem(self: Self, item: *types.Item) PageNum {
+    pub fn getPageNumOfItem(self: Self, item: *Item) PageNum {
         const this = self.private;
         const base_addr: *u8 = @ptrCast(&this.all_pages[0]);
         const item_addr: *u8 = @ptrCast(item);
@@ -111,7 +113,7 @@ const ItemIterator = struct {
 
     const Self = @This();
 
-    pub fn next(self: *Self) ?*types.Item {
+    pub fn next(self: *Self) ?*Item {
         if (self.current >= self.max_offset) {
             return null;
         }
@@ -119,24 +121,37 @@ const ItemIterator = struct {
         const item_addr = self.page_addr + (self.current * self.item_size);
         self.current = self.current + 1;
 
-        const item: *types.Item = @ptrCast(@alignCast(item_addr));
+        const item: *Item = @ptrCast(@alignCast(item_addr));
         return item;
     }
 };
 
-pub fn iterateItemsOfPage(page: *Page, item_size: u64) ItemIterator {
-    std.debug.assertAligned(page, types.Item.Alignment);
-    std.debug.assert(item_size % types.Item.Alignment.toByteUnits() == 0);
+pub fn iterateItemsOfPage(
+    page: *Page,
+    item_size: u64,
+    ctx: anytype,
+    yield: fn (ctx: @TypeOf(ctx), item: *Item) anyerror!bool,
+) !void {
+    std.debug.assertAligned(page, Item.Alignment);
+    std.debug.assert(item_size % Item.Alignment.toByteUnits() == 0);
 
+    const base_addr: [*]u8 = @ptrCast(page);
     const num_items = PageSize / item_size;
+    var current_addr = base_addr;
 
-    return .{
-        .item_size = item_size,
-        .page_addr = @ptrCast(page),
-        .current = 0,
-        .max_offset = num_items,
-    };
+    for (0..num_items) |_| {
+        const item: *Item = @ptrCast(@alignCast(current_addr));
+        const ok = try yield(ctx, item);
+        if (!ok) {
+            break;
+        }
+        current_addr = current_addr + item_size;
+    }
 }
+
+// ===========================================================================
+// Testing
+// ===========================================================================
 
 const expectEqual = std.testing.expectEqual;
 
@@ -176,47 +191,45 @@ test "basic" {
     try expectEqual(null, p4);
 
     // test get page num
-    const item1: *types.Item = @ptrCast(@alignCast(p1));
+    const item1: *Item = @ptrCast(@alignCast(p1));
     const num1 = g.getPageNumOfItem(item1);
     try expectEqual(0, num1.page_num);
     try expectEqual(11, g.getSlabClass(num1).slab);
 
-    const item2: *types.Item = @ptrCast(@alignCast(p2));
+    const item2: *Item = @ptrCast(@alignCast(p2));
     const num2 = g.getPageNumOfItem(item2);
     try expectEqual(1, num2.page_num);
     try expectEqual(12, g.getSlabClass(num2).slab);
 
-    const item3: *types.Item = @ptrCast(@alignCast(p3));
+    const item3: *Item = @ptrCast(@alignCast(p3));
     // check item getters
     item3.key_len = 31;
     item3.value_len = 51;
     const item3_base: [*]u8 = @ptrCast(item3);
     try expectEqual(2, g.getPageNumOfItem(item3).page_num);
     try expectEqual(31, item3.getKey().len);
-    try expectEqual(types.Item.Size, &item3.getKey()[0] - item3_base);
+    try expectEqual(Item.Size, &item3.getKey()[0] - item3_base);
     try expectEqual(51, item3.getValue().len);
-    try expectEqual(types.Item.Size + 31, &item3.getValue()[0] - item3_base);
+    try expectEqual(Item.Size + 31, &item3.getValue()[0] - item3_base);
 
     // test iterate
     const page1 = p1.?;
-    var it = iterateItemsOfPage(page1, 3 * 1024);
-    var counter: u64 = 0;
-    const base_addr: *u8 = &page1[0];
-    while (it.next()) |x| {
-        const item_addr: *u8 = @ptrCast(x);
-        // check offset
-        try expectEqual(3 * 1024 * counter, item_addr - base_addr);
-        counter = counter + 1;
-    }
 
-    try expectEqual(341, counter); // check total
-}
-
-test "no action" {
-    var g = try GlobalPager.init(
-        std.testing.io,
-        std.testing.allocator,
-        3,
-    );
-    defer g.deinit();
+    // iterate items of page
+    const IterateCtx = struct {
+        counter: u64,
+        base_addr: [*]u8,
+        fn yield(self: *@This(), x: *Item) !bool {
+            const item_addr: *u8 = @ptrCast(x);
+            try expectEqual(3 * 1024 * self.counter, item_addr - self.base_addr);
+            self.counter = self.counter + 1;
+            return true;
+        }
+    };
+    var ctx = IterateCtx{
+        .counter = 0,
+        .base_addr = page1,
+    };
+    try iterateItemsOfPage(page1, 3 * 1024, &ctx, IterateCtx.yield);
+    try expectEqual(341, ctx.counter); // check total
 }

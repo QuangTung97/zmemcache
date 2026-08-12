@@ -47,7 +47,17 @@ pub fn ILruService(T: type) type {
             return self.private.isSlabLocked(self.private.self, slab);
         }
 
+        pub fn putFreeItem(self: Self, slab: Slab, _: *Item) void {
+            std.debug.assert(self.isSlabLocked(slab));
+        }
+
+        pub fn getFreeItem(self: Self, slab: Slab) ?*Item {
+            std.debug.assert(self.isSlabLocked(slab));
+            return null;
+        }
+
         pub fn put(self: Self, slab: Slab, item: *Item) void {
+            std.debug.assert(self.isSlabLocked(slab));
             self.private.putItem(self.private.self, slab, item);
         }
 
@@ -56,8 +66,11 @@ pub fn ILruService(T: type) type {
         }
 
         pub fn delete(self: Self, slab: Slab, item: *Item) void {
+            std.debug.assert(self.isSlabLocked(slab));
             self.private.deleteItem(self.private.self, slab, item);
         }
+
+        // TODO iterate lru list
     };
 }
 

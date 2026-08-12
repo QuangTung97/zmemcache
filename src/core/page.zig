@@ -130,8 +130,8 @@ pub fn iterateItemsOfPage(
     page: *Page,
     item_size: u64,
     ctx: anytype,
-    yield: fn (ctx: @TypeOf(ctx), item: *Item) anyerror!bool,
-) !void {
+    yield: fn (ctx: @TypeOf(ctx), item: *Item) bool,
+) void {
     std.debug.assertAligned(page, Item.Alignment);
     std.debug.assert(item_size % Item.Alignment.toByteUnits() == 0);
 
@@ -141,7 +141,7 @@ pub fn iterateItemsOfPage(
 
     for (0..num_items) |_| {
         const item: *Item = @ptrCast(@alignCast(current_addr));
-        const ok = try yield(ctx, item);
+        const ok = yield(ctx, item);
         if (!ok) {
             break;
         }
@@ -219,9 +219,9 @@ test "basic" {
     const IterateCtx = struct {
         counter: u64,
         base_addr: [*]u8,
-        fn yield(self: *@This(), x: *Item) !bool {
+        fn yield(self: *@This(), x: *Item) bool {
             const item_addr: *u8 = @ptrCast(x);
-            try expectEqual(3 * 1024 * self.counter, item_addr - self.base_addr);
+            expectEqual(3 * 1024 * self.counter, item_addr - self.base_addr) catch unreachable;
             self.counter = self.counter + 1;
             return true;
         }
@@ -230,6 +230,6 @@ test "basic" {
         .counter = 0,
         .base_addr = page1,
     };
-    try iterateItemsOfPage(page1, 3 * 1024, &ctx, IterateCtx.yield);
+    iterateItemsOfPage(page1, 3 * 1024, &ctx, IterateCtx.yield);
     try expectEqual(341, ctx.counter); // check total
 }

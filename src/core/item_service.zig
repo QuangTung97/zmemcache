@@ -74,15 +74,6 @@ pub fn ItemService(H: type, L: type, S: type) type {
             self.table.deinit();
         }
 
-        const IterateAndPushFreeListCtx = struct {
-            self: *Self,
-            slab: types.SlabClass,
-            fn yield(ctx: *@This(), item: *Item) !bool {
-                ctx.self.lru_svc.putFreeItem(ctx.slab, item);
-                return true;
-            }
-        };
-
         pub fn put(self: *Self, key: []const u8) ?ItemSetter {
             const hash_value = self.hash.hashKey(key);
             const lock_slot = self.locker.getSlot(hash_value);
@@ -104,7 +95,15 @@ pub fn ItemService(H: type, L: type, S: type) type {
                 return null;
             };
 
-            var ctx = IterateAndPushFreeListCtx{
+            const IterateCtx = struct {
+                self: *Self,
+                slab: types.SlabClass,
+                fn yield(ctx: *@This(), item: *Item) bool {
+                    ctx.self.lru_svc.putFreeItem(ctx.slab, item);
+                    return true;
+                }
+            };
+            var ctx = IterateCtx{
                 .self = self,
                 .slab = slab,
             };
@@ -112,8 +111,8 @@ pub fn ItemService(H: type, L: type, S: type) type {
                 page,
                 item_size,
                 &ctx,
-                IterateAndPushFreeListCtx.yield,
-            ) catch unreachable;
+                IterateCtx.yield,
+            );
 
             const null_item = self.lru_svc.getFreeItem(slab);
             const result_item = if (null_item) |it| it else {

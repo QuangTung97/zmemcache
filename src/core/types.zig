@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Allocator = std.mem.Allocator;
+
 pub const LruList = enum(u2) { Hot, Warm, Cold };
 
 pub const SlabFlags = packed struct {
@@ -54,34 +56,77 @@ pub const Item = struct {
     }
 };
 
-pub const HashValue = struct { hash: u64 };
+pub const HashValue = struct {
+    hash: u64,
+    const Self = @This();
+    pub fn init(x: u64) Self {
+        return .{ .hash = x };
+    }
+};
 
-pub fn NewHash(x: u64) HashValue {
-    return .{ .hash = x };
-}
+pub const LockSlot = struct {
+    lock_slot: u64,
+    const Self = @This();
+    pub fn init(x: u64) Self {
+        return .{ .lock_slot = x };
+    }
+};
 
-pub const LockSlot = struct { lock_slot: u64 };
-
-pub fn NewLockSlot(x: u64) LockSlot {
-    return .{ .lock_slot = x };
-}
+pub const SlabClass = struct { slab: u32 };
 
 pub fn HashFunc(T: type) type {
     return struct {
         private: struct {
             self: *T,
-            hash: *const fn (self: *T, key: []const u8) HashValue,
+            hashKey: *const fn (self: *T, key: []const u8) HashValue,
         },
 
         const Self = @This();
 
+        pub fn init(obj: *T) Self {
+            return .{
+                .private = .{
+                    .self = obj,
+                    .hashKey = T.hashKey,
+                },
+            };
+        }
+
         pub fn hashKey(self: Self, key: []const u8) HashValue {
-            return self.private.hash(self.private.self, key);
+            return self.private.hashKey(self.private.self, key);
         }
     };
 }
 
-pub const SlabClass = struct { slab: u32 };
+pub const FakeHashFunc = struct {
+    const KeyMapType = std.StringHashMap(HashValue);
+    key_map: KeyMapType,
+
+    const Self = @This();
+
+    pub fn init(gpa: Allocator) Self {
+        const key_map = KeyMapType.init(gpa);
+        return .{
+            .key_map = key_map,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.key_map.deinit();
+    }
+
+    pub fn hashKey(self: *Self, key: []const u8) HashValue {
+        const value = self.key_map.get(key);
+        if (value) |v| {
+            return v;
+        }
+        @panic("not found key");
+    }
+
+    pub fn addKeyHash(self: *Self, key: []const u8, value: HashValue) void {
+        self.key_map.put(key, value) catch unreachable;
+    }
+};
 
 const expectEqual = std.testing.expectEqual;
 
@@ -91,4 +136,20 @@ test "check item size" {
     try expectEqual(8, @sizeOf(CasNum));
     try expectEqual(8 * 6, Item.Size);
     try expectEqual(std.mem.Alignment.@"8", Item.Alignment);
+}
+
+test "fake hash func" {
+    const gpa = std.testing.allocator;
+
+    var fake = FakeHashFunc.init(gpa);
+    defer fake.deinit();
+
+    const s = HashFunc(FakeHashFunc).init(&fake);
+
+    const hash1 = HashValue.init(41);
+    const key01 = "key01";
+
+    fake.addKeyHash(key01, hash1);
+
+    try expectEqual(hash1, s.hashKey(key01));
 }

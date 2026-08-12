@@ -26,7 +26,7 @@ const HashTable = struct {
     }
 };
 
-pub fn NewItemService(H: type, L: type, S: type) type {
+pub fn ItemService(H: type, L: type, S: type) type {
     return struct {
         private: struct {
             hash: types.HashFunc(H),
@@ -70,4 +70,17 @@ test "hash table" {
     defer h.deinit();
 
     try expectEqual(0b11111, h.mask);
+}
+
+test "item service" {
+    // TODO
+    // const gpa = std.testing.allocator;
+    // const ServiceType = ItemService();
+    // const s = ServiceType.init(
+    //     gpa,
+    //     hash_func,
+    //     locker,
+    //     slab_svc,
+    //     pager,
+    // );
 }

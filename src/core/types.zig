@@ -37,6 +37,21 @@ pub const Item = struct {
     const Self = @This();
     pub const Size = @sizeOf(Self);
     pub const Alignment = std.mem.Alignment.fromByteUnits(@alignOf(Self));
+
+    fn getKeyAddr(self: *Self) [*]u8 {
+        const base_addr: [*]u8 = @ptrCast(self);
+        return  base_addr + Size;
+    }
+
+    pub fn getKey(self: *Self) []u8 {
+        const key_addr = self.getKeyAddr();
+        return key_addr[0..self.key_len];
+    }
+
+    pub fn getValue(self: *Self) []u8 {
+        const value_addr = self.getKeyAddr() + self.key_len;
+        return value_addr[0..self.value_len];
+    }
 };
 
 pub const HashValue = struct { hash: u64 };

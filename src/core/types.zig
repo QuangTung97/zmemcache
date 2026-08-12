@@ -98,6 +98,10 @@ pub fn HashFunc(T: type) type {
     };
 }
 
+// ===========================================================================
+// Fake Hash Func
+// ===========================================================================
+
 pub const FakeHashFunc = struct {
     const KeyMapType = std.StringHashMap(HashValue);
     key_map: KeyMapType,
@@ -127,6 +131,8 @@ pub const FakeHashFunc = struct {
         self.key_map.put(key, value) catch unreachable;
     }
 };
+
+// ===========================================================================
 
 const expectEqual = std.testing.expectEqual;
 

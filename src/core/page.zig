@@ -32,8 +32,8 @@ pub const GlobalPager = struct {
         );
         const pages_to_slab = try gpa.alloc(std.atomic.Value(u32), num_pages);
 
-        for (pages_to_slab) |*item| {
-            item.* = .init(MaxSlab);
+        for (pages_to_slab) |*x| {
+            x.* = .init(MaxSlab);
         }
 
         return Self{
@@ -210,4 +210,13 @@ test "basic" {
     }
 
     try expectEqual(341, counter); // check total
+}
+
+test "no action" {
+    var g = try GlobalPager.init(
+        std.testing.io,
+        std.testing.allocator,
+        3,
+    );
+    defer g.deinit();
 }

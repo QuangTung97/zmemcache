@@ -45,23 +45,26 @@ pub fn ItemService(
     L: type,
     S: type,
     item_locks: zlock.ItemLockFuncs(L),
+    lru_funcs: zlru.LruFuncs(S),
 ) type {
     return struct {
         hash: types.HashFunc(H),
         locker: *L,
-        lru_svc: zlru.ILruService(S),
+        lru_svc: *S,
 
         pager: *zpage.GlobalPager,
         table: HashTable,
 
         const Self = @This();
+
         const ItemLocks = item_locks;
+        const LruFuncs = lru_funcs;
 
         pub fn init(
             gpa: std.mem.Allocator,
             hash_func: types.HashFunc(H),
             locker: *L,
-            lru_svc: zlru.ILruService(S),
+            lru_svc: *S,
             pager: *zpage.GlobalPager,
             hash_size_log: u6,
         ) !Self {
@@ -90,12 +93,12 @@ pub fn ItemService(
             const item_size = 128; // TODO
             const slab = types.SlabClass{ .slab = 11 }; // TODO
 
-            self.lru_svc.lockSlab(slab);
-            defer self.lru_svc.unlockSlab(slab); // TODO
+            LruFuncs.lockSlab(self.lru_svc, slab);
+            defer LruFuncs.unlockSlab(self.lru_svc, slab);
 
             // TODO get from free list first
 
-            std.debug.assert(self.lru_svc.isSlabLocked(slab));
+            std.debug.assert(LruFuncs.isSlabLocked(self.lru_svc, slab));
             const null_page = self.pager.allocPage(slab);
             const page = if (null_page) |p| p else {
                 return null;
@@ -105,7 +108,7 @@ pub fn ItemService(
                 self: *Self,
                 slab: types.SlabClass,
                 fn yield(ctx: *@This(), item: *Item) bool {
-                    ctx.self.lru_svc.putFreeItem(ctx.slab, item);
+                    LruFuncs.putFreeItem(ctx.self.lru_svc, ctx.slab, item);
                     return true;
                 }
             };
@@ -120,7 +123,7 @@ pub fn ItemService(
                 IterateCtx.yield,
             );
 
-            const null_item = self.lru_svc.getFreeItem(slab);
+            const null_item = LruFuncs.getFreeItem(self.lru_svc, slab);
             const result_item = if (null_item) |it| it else {
                 return null;
             };
@@ -162,6 +165,7 @@ const ServiceTest = struct {
         zlock.FakeItemLocks,
         zlru.FakeLruService,
         zlock.NewItemLockFuncs(zlock.FakeItemLocks),
+        zlru.NewLruFuncs(zlru.FakeLruService),
     );
     const Self = @This();
 
@@ -188,7 +192,7 @@ const ServiceTest = struct {
             gpa,
             types.HashFunc(types.FakeHashFunc).init(&s.hash_func),
             &s.locker,
-            zlru.ILruService(zlru.FakeLruService).init(&s.lru_svc),
+            &s.lru_svc,
             &s.pager,
             5,
         );

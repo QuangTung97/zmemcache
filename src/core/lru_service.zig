@@ -5,72 +5,33 @@ const Allocator = std.mem.Allocator;
 const Item = types.Item;
 const Slab = types.SlabClass;
 
-pub fn ILruService(T: type) type {
+pub fn LruFuncs(T: type) type {
     return struct {
-        private: struct {
-            self: *T,
+        lockSlab: fn (self: *T, slab: Slab) void,
+        unlockSlab: fn (self: *T, slab: Slab) void,
+        isSlabLocked: fn (self: *T, slab: Slab) bool,
 
-            lockSlab: *const fn (self: *T, slab: Slab) void,
-            unlockSlab: *const fn (self: *T, slab: Slab) void,
-            isSlabLocked: *const fn (self: *T, slab: Slab) bool,
+        putItem: fn (self: *T, slab: Slab, item: *Item) void,
+        touchItem: fn (self: *T, slab: Slab, item: *Item) void,
+        deleteItem: fn (self: *T, slab: Slab, item: *Item) void,
 
-            putItem: *const fn (self: *T, slab: Slab, item: *Item) void,
-            touchItem: *const fn (self: *T, slab: Slab, item: *Item) void,
-            deleteItem: *const fn (self: *T, slab: Slab, item: *Item) void,
-        },
+        putFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
+        getFreeItem: fn (self: *T, slab: Slab) ?*Item,
+    };
+}
 
-        const Self = @This();
+pub fn NewLruFuncs(T: type) LruFuncs(T) {
+    return .{
+        .lockSlab = T.lockSlab,
+        .unlockSlab = T.unlockSlab,
+        .isSlabLocked = T.isSlabLocked,
 
-        pub fn init(obj: *T) Self {
-            return .{
-                .private = .{
-                    .self = obj,
-                    .lockSlab = T.lockSlab,
-                    .unlockSlab = T.unlockSlab,
-                    .isSlabLocked = T.isSlabLocked,
-                    .putItem = T.putItem,
-                    .touchItem = T.touchItem,
-                    .deleteItem = T.deleteItem,
-                },
-            };
-        }
+        .putItem = T.putItem,
+        .touchItem = T.touchItem,
+        .deleteItem = T.deleteItem,
 
-        pub fn lockSlab(self: Self, slab: Slab) void {
-            self.private.lockSlab(self.private.self, slab);
-        }
-
-        pub fn unlockSlab(self: Self, slab: Slab) void {
-            self.private.unlockSlab(self.private.self, slab);
-        }
-
-        pub fn isSlabLocked(self: Self, slab: Slab) bool {
-            return self.private.isSlabLocked(self.private.self, slab);
-        }
-
-        pub fn putFreeItem(self: Self, slab: Slab, _: *Item) void {
-            std.debug.assert(self.isSlabLocked(slab));
-        }
-
-        pub fn getFreeItem(self: Self, slab: Slab) ?*Item {
-            std.debug.assert(self.isSlabLocked(slab));
-            return null;
-        }
-
-        pub fn put(self: Self, slab: Slab, item: *Item) void {
-            std.debug.assert(self.isSlabLocked(slab));
-            self.private.putItem(self.private.self, slab, item);
-        }
-
-        pub fn touch(self: Self, slab: Slab, item: *Item) void {
-            self.private.touchItem(self.private.self, slab, item);
-        }
-
-        pub fn delete(self: Self, slab: Slab, item: *Item) void {
-            std.debug.assert(self.isSlabLocked(slab));
-            self.private.deleteItem(self.private.self, slab, item);
-        }
-
-        // TODO iterate lru list
+        .putFreeItem = T.putFreeItem,
+        .getFreeItem = T.getFreeItem,
     };
 }
 
@@ -114,6 +75,12 @@ pub const FakeLruService = struct {
     pub fn touchItem(_: *Self, _: Slab, _: *Item) void {}
 
     pub fn deleteItem(_: *Self, _: Slab, _: *Item) void {}
+
+    pub fn putFreeItem(_: *Self, _: Slab, _: *Item) void {}
+
+    pub fn getFreeItem(_: *Self, _: Slab) ?*Item {
+        return null;
+    }
 };
 
 // ===========================================================================
@@ -125,21 +92,22 @@ test "lock & unlock" {
     var fake = FakeLruService.init(gpa);
     defer fake.deinit();
 
-    const s = ILruService(FakeLruService).init(&fake);
+    // const s = ILruService(FakeLruService).init(&fake);
+    const s = NewLruFuncs(FakeLruService);
 
     const slab1 = Slab{ .slab = 21 };
     const slab2 = Slab{ .slab = 22 };
 
-    try expectEqual(false, s.isSlabLocked(slab1));
-    try expectEqual(false, s.isSlabLocked(slab2));
+    try expectEqual(false, s.isSlabLocked(&fake, slab1));
+    try expectEqual(false, s.isSlabLocked(&fake, slab2));
 
     // lock
-    s.lockSlab(slab1);
+    s.lockSlab(&fake, slab1);
 
-    try expectEqual(true, s.isSlabLocked(slab1));
-    try expectEqual(false, s.isSlabLocked(slab2));
+    try expectEqual(true, s.isSlabLocked(&fake, slab1));
+    try expectEqual(false, s.isSlabLocked(&fake, slab2));
 
     // unlock
-    s.unlockSlab(slab1);
-    try expectEqual(false, s.isSlabLocked(slab1));
+    s.unlockSlab(&fake, slab1);
+    try expectEqual(false, s.isSlabLocked(&fake, slab1));
 }

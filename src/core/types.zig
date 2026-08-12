@@ -74,26 +74,6 @@ pub const LockSlot = struct {
 
 pub const SlabClass = struct { slab: u32 };
 
-pub fn Iterator(T: type) type {
-    return struct {
-        _ctx: *anyopaque,
-        _yield: *const fn (ctx: *anyopaque, x: T) bool,
-
-        const Self = @This();
-
-        pub fn init(ctx: anytype) Self {
-            const CtxType = @TypeOf(ctx.*);
-            return .{
-                ._ctx = ctx,
-                ._yield = CtxType.yield,
-            };
-        }
-
-        pub fn yield(self: Self, x: T) bool {
-            return self._yield(self._ctx, x);
-        }
-    };
-}
 
 pub fn HashFunc(T: type) type {
     return struct {
@@ -179,22 +159,4 @@ test "fake hash func" {
     fake.addKeyHash(key01, hash1);
 
     try expectEqual(hash1, s.hashKey(key01));
-}
-
-test "iterator" {
-    const TestCtx = struct {
-        sum: i32 = 0,
-        fn yield(ctx: *anyopaque, x: i32) bool {
-            const c: *@This() = @ptrCast(@alignCast(ctx));
-            c.sum = c.sum + x;
-            return true;
-        }
-    };
-    var ctx = TestCtx{};
-
-    const callback = Iterator(i32).init(&ctx);
-    try expectEqual(true, callback.yield(11));
-    try expectEqual(true, callback.yield(12));
-
-    try expectEqual(23, ctx.sum);
 }

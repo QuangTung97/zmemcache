@@ -9,6 +9,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const zutil_mod = b.addModule("zutil", .{
+        .root_source_file = b.path("src/util/root.zig"),
+        .target = target,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zmemcache",
         .root_module = b.createModule(.{
@@ -17,6 +22,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zcore", .module = zcore_mod },
+                .{ .name = "zutil", .module = zutil_mod },
             },
         }),
     });
@@ -32,11 +38,17 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const zcore_mod_tests = b.addTest(.{
-        .root_module = zcore_mod,
-    });
-    const run_mod_tests = b.addRunArtifact(zcore_mod_tests);
-
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
+    addTestModule(b, test_step, zcore_mod);
+    addTestModule(b, test_step, zutil_mod);
+}
+
+fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module) void {
+    test_step.dependOn(
+        &b.addRunArtifact(
+            b.addTest(.{
+                .root_module = mod,
+            }),
+        ).step,
+    );
 }

@@ -14,6 +14,7 @@ pub fn LruFuncs(T: type) type {
         putItem: fn (self: *T, slab: Slab, item: *Item) void,
         touchItem: fn (self: *T, slab: Slab, item: *Item) void,
         deleteItem: fn (self: *T, slab: Slab, item: *Item) void,
+        // iterateLru: fn (self: *T, slab: Slab) LruIter, TODO add back
 
         putFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
         getFreeItem: fn (self: *T, slab: Slab) ?*Item,

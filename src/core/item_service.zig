@@ -44,9 +44,9 @@ pub fn ItemService(
     H: type,
     L: type,
     S: type,
-    hash_func: types.HashFunc(H),
-    item_locks: zlock.ItemLockFuncs(L),
-    lru_funcs: zlru.LruFuncs(S),
+    HashFunc: types.HashFunc(H),
+    ItemLocks: zlock.ItemLockFuncs(L),
+    LruFuncs: zlru.LruFuncs(S),
 ) type {
     return struct {
         _hasher: *H,
@@ -57,10 +57,6 @@ pub fn ItemService(
         _table: HashTable,
 
         const Self = @This();
-
-        const HashFunc = hash_func;
-        const ItemLocks = item_locks;
-        const LruFuncs = lru_funcs;
 
         pub fn init(
             gpa: std.mem.Allocator,

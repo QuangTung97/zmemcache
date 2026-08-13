@@ -1,6 +1,8 @@
 const std = @import("std");
+const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
+const ListHead = zutil.ListHead;
 
 pub const LruList = enum(u2) { Hot, Warm, Cold };
 
@@ -33,8 +35,7 @@ pub const Item = struct {
 
     hash_next: ?*Item, // protected by item lock
 
-    lru_next: *Item, // protected by slab lock
-    lru_prev: *Item, // protected by slab lock
+    lru_list: ListHead, // protected by slab lock
 
     cas_num: CasNum, // protected by item lock
 
@@ -53,6 +54,10 @@ pub const Item = struct {
     pub fn getValue(self: *Self) []u8 {
         const value_addr = self.getKeyAddr() + self.key_len;
         return value_addr[0..self.value_len];
+    }
+
+    pub fn fromList(entry: *ListHead) *Self {
+        return @fieldParentPtr("lru_list", entry);
     }
 };
 
@@ -128,6 +133,12 @@ test "check item size" {
     try expectEqual(8, @sizeOf(CasNum));
     try expectEqual(8 * 6, Item.Size);
     try expectEqual(std.mem.Alignment.@"8", Item.Alignment);
+}
+
+test "check lru list" {
+    var item: Item = undefined;
+    const entry = &item.lru_list;
+    try expectEqual(&item, Item.fromList(entry));
 }
 
 test "fake hash func" {

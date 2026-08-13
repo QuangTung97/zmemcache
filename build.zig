@@ -4,14 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const zcore_mod = b.addModule("zcore", .{
-        .root_source_file = b.path("src/core/root.zig"),
-        .target = target,
-    });
 
     const zutil_mod = b.addModule("zutil", .{
         .root_source_file = b.path("src/util/root.zig"),
         .target = target,
+    });
+
+    const zcore_mod = b.addModule("zcore", .{
+        .root_source_file = b.path("src/core/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zutil", .module = zutil_mod },
+        },
     });
 
     const exe = b.addExecutable(.{
@@ -22,7 +26,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "zcore", .module = zcore_mod },
-                .{ .name = "zutil", .module = zutil_mod },
             },
         }),
     });

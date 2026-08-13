@@ -96,6 +96,10 @@ pub const Item = struct {
         return Size + self.key_len + self.value_len;
     }
 
+    pub fn toItemAddr(self: *Self) [*]u8 {
+        return @ptrCast(self);
+    }
+
     pub fn computeItemSize(key_len: usize, value_len: usize) usize {
         return Size + key_len + value_len;
     }

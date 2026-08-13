@@ -93,7 +93,7 @@ pub const GlobalPager = struct {
 
     pub fn getPageNumOfItem(self: *const Self, item: *Item) PageNum {
         const this = self.priv;
-        const item_addr: [*]u8 = @ptrCast(item);
+        const item_addr: [*]u8 = item.toItemAddr();
         const offset = item_addr - this.all_pages.ptr;
         const page_num = offset >> self.priv.page_size_shift;
         return .{ .page_num = page_num };

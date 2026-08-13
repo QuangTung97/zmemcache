@@ -261,4 +261,7 @@ test "free list" {
     s.putFreeItem(slab1, &item3);
 
     try expectItemValue(43, s.getFreeItem(slab1));
+    try expectItemValue(42, s.getFreeItem(slab1));
+    try expectItemValue(41, s.getFreeItem(slab1));
+    try expectEqual(null, s.getFreeItem(slab1));
 }

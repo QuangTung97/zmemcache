@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
 const Item = types.Item;
 const SlabClass = types.SlabClass;
+const SlabSize = zslab.SlabSize;
 const CasNum = types.CasNum;
 const SlabClassConfig = zslab.SlabClassConfig;
 
@@ -100,7 +101,6 @@ pub fn ItemService(
             const raw_item_size = Item.computeItemSize(key.len, value_len);
             const slab_size = self._slab_conf.getItemSlab(raw_item_size);
             const slab = slab_size.slab_class;
-            const item_size = slab_size.item_size;
 
             // lock with item locks
             ItemLocks.lock(self._locker, lock_slot);
@@ -110,12 +110,13 @@ pub fn ItemService(
             LruFuncs.lockSlab(self._lru, slab);
             defer LruFuncs.unlockSlab(self._lru, slab);
 
-            const null_item = self.getFreeItem(slab, item_size);
+            const null_item = self.getFreeItem(slab_size);
             if (null_item) |it| {
                 // init item
                 const cas_num = self.nextCasNum();
                 it.* = Item.init(key.len, value_len, cas_num);
                 it.item_flags.set_partial = true;
+                it.refcount.refcount += 1;
 
                 // copy the key
                 @memcpy(it.getKey(), key);
@@ -130,7 +131,15 @@ pub fn ItemService(
             }
         }
 
-        pub fn finishPut(_: *Self, _: ItemSetter) void {}
+        pub fn finishPut(self: *Self, setter: ItemSetter) void {
+            const slot = ItemLocks.getSlot(self._locker, setter.hash);
+
+            ItemLocks.lock(self._locker, slot);
+            defer ItemLocks.unlock(self._locker, slot);
+
+            setter.item.item_flags.set_partial = false;
+            setter.item.refcount.refcount -= 1;
+        }
 
         pub fn get(_: *Self, _: []const u8) ItemGetter {
             return .{
@@ -138,34 +147,37 @@ pub fn ItemService(
             };
         }
 
-        fn getFreeItem(self: *Self, slab: SlabClass, item_size: usize) ?*Item {
-            const null_item = LruFuncs.getFreeItem(self._lru, slab);
-            if (null_item) |it| {
+        fn getFreeItem(self: *Self, slab: SlabSize) ?*Item {
+            const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
+            if (null_item1) |it| {
                 return it;
             }
 
             // try to get new page from page pool
-            self.getNewPageFromPool(slab, item_size);
+            self.getNewPageFromPool(slab);
 
-            const new_null_item = LruFuncs.getFreeItem(self._lru, slab);
-            if (new_null_item) |it| {
+            const null_item2n = LruFuncs.getFreeItem(self._lru, slab.slab_class);
+            if (null_item2n) |it| {
                 return it;
             }
+
+            // TODO
+            // self.evictFromLru(slab);
 
             return null;
         }
 
-        fn getNewPageFromPool(self: *Self, slab: SlabClass, item_size: usize) void {
-            std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab));
+        fn getNewPageFromPool(self: *Self, slab: SlabSize) void {
+            std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab.slab_class));
 
-            const null_page = self._pager.allocPage(slab);
+            const null_page = self._pager.allocPage(slab.slab_class);
             const page = if (null_page) |p| p else {
                 return;
             };
 
             const IterateCtx = struct {
                 self: *Self,
-                slab: types.SlabClass,
+                slab: SlabClass,
                 fn yield(ctx: *@This(), item: *Item) bool {
                     LruFuncs.putFreeItem(ctx.self._lru, ctx.slab, item);
                     return true;
@@ -173,11 +185,11 @@ pub fn ItemService(
             };
             var ctx = IterateCtx{
                 .self = self,
-                .slab = slab,
+                .slab = slab.slab_class,
             };
             self._pager.iterateItemsOfPage(
                 page,
-                item_size,
+                slab.item_size,
                 &ctx,
                 IterateCtx.yield,
             );
@@ -207,6 +219,18 @@ test "hash table" {
     try expectEqual(0b11111, h.mask);
 }
 
+const key01 = "key01";
+const hash1 = HashValue.init(21);
+
+const key02 = "key02";
+const hash2 = HashValue.init(22);
+
+const key03 = "key03";
+const hash3 = HashValue.init(23);
+
+const key04 = "key04";
+const hash4 = HashValue.init(24);
+
 const ServiceTest = struct {
     const ServiceType = ItemService(
         types.FakeHashFunc,
@@ -226,7 +250,11 @@ const ServiceTest = struct {
     lru_svc: zlru.FakeLruService,
     svc: ServiceType,
 
-    fn init() !*Self {
+    const Config = struct {
+        num_pages: u64 = 3,
+    };
+
+    fn init(conf: Config) !*Self {
         const io = std.testing.io;
         const gpa = std.testing.allocator;
 
@@ -240,7 +268,7 @@ const ServiceTest = struct {
             512,
             1.5,
         );
-        s.pager = try zpage.GlobalPager.init(io, gpa, 9, 3);
+        s.pager = try zpage.GlobalPager.init(io, gpa, 9, conf.num_pages);
         s.locker = zlock.FakeItemLocks.init(gpa);
         s.lru_svc = zlru.FakeLruService.init(gpa);
 
@@ -253,6 +281,12 @@ const ServiceTest = struct {
             &s.lru_svc,
             5,
         );
+
+        // setup hash values
+        s.hash_func.addKeyHash(key01, hash1);
+        s.hash_func.addKeyHash(key02, hash2);
+        s.hash_func.addKeyHash(key03, hash3);
+        s.hash_func.addKeyHash(key04, hash4);
 
         return s;
     }
@@ -268,31 +302,68 @@ const ServiceTest = struct {
     }
 };
 
-test "basic" {
-    const svc = try ServiceTest.init();
-    defer svc.deinit();
+test "put then finish" {
+    const s = try ServiceTest.init(.{});
+    defer s.deinit();
 
-    const key01 = "key01";
-    const hash1 = HashValue.init(21);
-
-    // setup hash values
-    svc.hash_func.addKeyHash(key01, hash1);
-
-    // put1
-    const s1 = svc.svc.put(key01, 46).?;
+    // put
+    const setter = s.svc.put(key01, 46).?;
 
     // check basic setter info
-    try expectEqual(hash1, s1.hash);
-    try expectEqual(SlabClass.init(1), s1.slab);
-    try expectEqual(144, svc.slab_conf.getSlabSize(s1.slab));
+    try expectEqual(hash1, setter.hash);
+    try expectEqual(SlabClass.init(1), setter.slab);
+    try expectEqual(144, s.slab_conf.getSlabSize(setter.slab));
 
     // check item key
-    try expectEqual(Item.Size + key01.len + 46, s1.item.getItemSize());
-    try std.testing.expectEqualStrings(key01, s1.item.getKey());
+    try expectEqual(Item.Size + key01.len + 46, setter.item.getItemSize());
+    try std.testing.expectEqualStrings(key01, setter.item.getKey());
 
     // check flags
-    try expectEqual(true, s1.item.slab_flags.is_present);
-    try expectEqual(false, s1.item.item_flags.is_deleting);
-    try expectEqual(true, s1.item.item_flags.set_partial);
-    try expectEqual(1, s1.item.refcount.refcount);
+    try expectEqual(true, setter.item.slab_flags.is_present);
+    try expectEqual(false, setter.item.item_flags.is_deleting);
+    try expectEqual(true, setter.item.item_flags.set_partial);
+    try expectEqual(2, setter.item.refcount.refcount);
+
+    // check address
+    try expectEqual(144 * 2, setter.item.toItemAddr() - s.pager.getBaseAddr());
+
+    // set value
+    try expectEqual(46, setter.item.getValue().len);
+    @memset(setter.item.getValue(), 'A');
+
+    s.svc.finishPut(setter);
+
+    // check flags
+    try expectEqual(true, setter.item.slab_flags.is_present);
+    try expectEqual(false, setter.item.item_flags.is_deleting);
+    try expectEqual(false, setter.item.item_flags.set_partial);
+    try expectEqual(1, setter.item.refcount.refcount);
+
+    // check actions
+    try std.testing.expectEqualSlices(zlock.LockAction, &.{
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash1.hash },
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash1.hash },
+    }, s.locker.actions.items);
+}
+
+test "with eviction" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    const setter1 = s.svc.put(key01, 46).?;
+    s.svc.finishPut(setter1);
+
+    const setter2 = s.svc.put(key02, 46).?;
+    s.svc.finishPut(setter2);
+
+    const setter3 = s.svc.put(key03, 46).?;
+    s.svc.finishPut(setter3);
+
+    // clear lock actions
+    s.locker.actions.clearRetainingCapacity();
+
+    const setter4 = s.svc.put(key04, 46).?;
+    s.svc.finishPut(setter4);
 }

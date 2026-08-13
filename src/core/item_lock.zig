@@ -28,13 +28,13 @@ pub fn NewItemLockFuncs(T: type) ItemLockFuncs(T) {
 // Fake Item Locks
 // ===========================================================================
 
-const LockActionType = enum {
-    lock,
-    unlock,
-    tryLock,
+pub const LockActionType = enum {
+    Lock,
+    Unlock,
+    TryLock,
 };
 
-const LockAction = struct {
+pub const LockAction = struct {
     action: LockActionType,
     hash: u64,
 };
@@ -69,7 +69,7 @@ pub const FakeItemLocks = struct {
         std.debug.assert(!self.lockedSet.contains(slot));
         self.lockedSet.put(slot, .{}) catch unreachable;
         self.actions.append(self.gpa, LockAction{
-            .action = .lock,
+            .action = .Lock,
             .hash = slot.lock_slot,
         }) catch unreachable;
     }
@@ -84,7 +84,7 @@ pub const FakeItemLocks = struct {
         }
         self.lockedSet.put(slot, .{}) catch unreachable;
         self.actions.append(self.gpa, LockAction{
-            .action = .tryLock,
+            .action = .TryLock,
             .hash = slot.lock_slot,
         }) catch unreachable;
         return true;
@@ -94,7 +94,7 @@ pub const FakeItemLocks = struct {
         const ok = self.lockedSet.remove(slot);
         std.debug.assert(ok);
         self.actions.append(self.gpa, LockAction{
-            .action = .unlock,
+            .action = .Unlock,
             .hash = slot.lock_slot,
         }) catch unreachable;
     }
@@ -132,10 +132,10 @@ test "fake item locks" {
     try std.testing.expectEqualSlices(
         LockAction,
         &.{
-            LockAction{ .action = .lock, .hash = 11 },
-            LockAction{ .action = .lock, .hash = 12 },
-            LockAction{ .action = .tryLock, .hash = 13 },
-            LockAction{ .action = .unlock, .hash = 11 },
+            LockAction{ .action = .Lock, .hash = 11 },
+            LockAction{ .action = .Lock, .hash = 12 },
+            LockAction{ .action = .TryLock, .hash = 13 },
+            LockAction{ .action = .Unlock, .hash = 11 },
         },
         obj.actions.items,
     );

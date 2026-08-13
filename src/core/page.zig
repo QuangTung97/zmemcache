@@ -144,6 +144,10 @@ pub const GlobalPager = struct {
             current_addr = @alignCast(current_addr + item_size);
         }
     }
+
+    pub fn getBaseAddr(self: *const Self) [*]u8 {
+        return self.priv.all_pages.ptr;
+    }
 };
 
 // ===========================================================================

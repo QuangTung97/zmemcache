@@ -63,21 +63,24 @@ pub const Item = struct {
 
 pub const HashValue = struct {
     hash: u64,
-    const Self = @This();
-    pub fn init(x: u64) Self {
+    pub fn init(x: u64) @This() {
         return .{ .hash = x };
     }
 };
 
 pub const LockSlot = struct {
     lock_slot: u64,
-    const Self = @This();
-    pub fn init(x: u64) Self {
+    pub fn init(x: u64) @This() {
         return .{ .lock_slot = x };
     }
 };
 
-pub const SlabClass = struct { slab: u32 };
+pub const SlabClass = struct {
+    slab: u32,
+    pub fn init(x: u32) @This() {
+        return .{ .slab = x };
+    }
+};
 
 pub fn HashFunc(T: type) type {
     return struct {
@@ -133,6 +136,12 @@ test "check item size" {
     try expectEqual(8, @sizeOf(CasNum));
     try expectEqual(8 * 6, Item.Size);
     try expectEqual(std.mem.Alignment.@"8", Item.Alignment);
+
+    try expectEqual(true, Item.Alignment.check(16));
+    try expectEqual(false, Item.Alignment.check(17));
+    try expectEqual(false, Item.Alignment.check(19));
+    try expectEqual(false, Item.Alignment.check(20));
+    try expectEqual(true, Item.Alignment.check(24));
 }
 
 test "check lru list" {

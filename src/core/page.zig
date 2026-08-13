@@ -133,7 +133,7 @@ pub fn iterateItemsOfPage(
     yield: fn (ctx: @TypeOf(ctx), item: *Item) bool,
 ) void {
     std.debug.assertAligned(page, Item.Alignment);
-    std.debug.assert(item_size % Item.Alignment.toByteUnits() == 0);
+    std.debug.assert(Item.Alignment.check(item_size));
 
     const base_addr: [*]u8 = @ptrCast(page);
     const num_items = PageSize / item_size;

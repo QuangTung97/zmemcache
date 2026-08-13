@@ -11,7 +11,9 @@ const Item = types.Item;
 const SlabClass = types.SlabClass;
 const SlabSize = zslab.SlabSize;
 const CasNum = types.CasNum;
+const LockSlot = types.LockSlot;
 const SlabClassConfig = zslab.SlabClassConfig;
+const ItemIter = zlru.ItemIter;
 
 const HashTable = struct {
     gpa: std.mem.Allocator,
@@ -110,25 +112,29 @@ pub fn ItemService(
             LruFuncs.lockSlab(self._lru, slab);
             defer LruFuncs.unlockSlab(self._lru, slab);
 
-            const null_item = self.getFreeItem(slab_size);
-            if (null_item) |it| {
-                // init item
-                const cas_num = self.nextCasNum();
-                it.* = Item.init(key.len, value_len, cas_num);
-                it.item_flags.set_partial = true;
-                it.refcount.refcount += 1;
-
-                // copy the key
-                @memcpy(it.getKey(), key);
-
-                return .{
-                    .hash = hash_value,
-                    .slab = slab,
-                    .item = it,
-                };
-            } else {
+            const null_item = self.getFreeItem(slab_size, lock_slot);
+            const it = if (null_item) |x| x else {
+                // return if not found
                 return null;
-            }
+            };
+
+            // init item
+            const cas_num = self.nextCasNum();
+            it.* = Item.init(key.len, value_len, cas_num);
+            it.item_flags.set_partial = true;
+            it.refcount.refcount += 1;
+
+            // copy the key
+            @memcpy(it.getKey(), key);
+
+            // put to lru list
+            LruFuncs.putItem(self._lru, slab, it);
+
+            return .{
+                .hash = hash_value,
+                .slab = slab,
+                .item = it,
+            };
         }
 
         pub fn finishPut(self: *Self, setter: ItemSetter) void {
@@ -147,7 +153,7 @@ pub fn ItemService(
             };
         }
 
-        fn getFreeItem(self: *Self, slab: SlabSize) ?*Item {
+        fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
             if (null_item1) |it| {
                 return it;
@@ -161,14 +167,14 @@ pub fn ItemService(
                 return it;
             }
 
-            // TODO
-            // self.evictFromLru(slab);
+            // evict from lru if no free item exists
+            self.evictFromLru(slab.slab_class, lock_slot);
 
-            return null;
+            return LruFuncs.getFreeItem(self._lru, slab.slab_class);
         }
 
         fn getNewPageFromPool(self: *Self, slab: SlabSize) void {
-            std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab.slab_class));
+            self.assertSlabLocked(slab.slab_class);
 
             const null_page = self._pager.allocPage(slab.slab_class);
             const page = if (null_page) |p| p else {
@@ -195,6 +201,46 @@ pub fn ItemService(
             );
 
             // TODO add page to the slab
+        }
+
+        fn evictFromLru(self: *Self, slab: SlabClass, current_slot: LockSlot) void {
+            self.assertSlabLocked(slab);
+
+            var ctx = struct {
+                self: *Self,
+                slab: SlabClass,
+                current_slot: LockSlot,
+                pub fn yield(ctx: *@This(), item: *Item) bool {
+                    const ok = ctx.self.tryToEvictItem(
+                        item,
+                        ctx.slab,
+                        ctx.current_slot,
+                    );
+                    return !ok;
+                }
+            }{
+                .self = self,
+                .slab = slab,
+                .current_slot = current_slot,
+            };
+
+            // iterate through lru list
+            LruFuncs.iterateItems(
+                self._lru,
+                slab,
+                ItemIter.init(&ctx),
+            );
+        }
+
+        fn tryToEvictItem(self: *Self, item: *Item, slab: SlabClass, _: LockSlot) bool {
+            self.assertSlabLocked(slab);
+            LruFuncs.deleteItem(self._lru, slab, item);
+            LruFuncs.putFreeItem(self._lru, slab, item);
+            return true;
+        }
+
+        fn assertSlabLocked(self: *Self, slab: SlabClass) void {
+            std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab));
         }
 
         fn nextCasNum(self: *Self) CasNum {
@@ -366,4 +412,7 @@ test "with eviction" {
 
     const setter4 = s.svc.put(key04, 46).?;
     s.svc.finishPut(setter4);
+
+    // TODO check remain items
+    // TODO check lock actions
 }

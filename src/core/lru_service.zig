@@ -4,14 +4,14 @@ const zutil = @import("zutil");
 const zpage = @import("page.zig");
 
 const Allocator = std.mem.Allocator;
-
-const ItemIter = zutil.Iterator(*Item);
 const ListHead = zutil.ListHead;
 
 const Item = types.Item;
 const Slab = types.SlabClass;
 const CasNum = types.CasNum;
 const PageNum = zpage.PageNum;
+
+pub const ItemIter = zutil.Iterator(*Item);
 
 pub fn LruFuncs(T: type) type {
     return struct {

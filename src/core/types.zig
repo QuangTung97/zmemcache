@@ -18,7 +18,12 @@ pub const ItemFlags = packed struct {
 
 pub const RefCount = struct { refcount: u32 };
 
-pub const CasNum = struct { cas: u64 };
+pub const CasNum = struct {
+    cas: u64 ,
+    pub fn init(x: u64) @This() {
+        return .{.cas = x};
+    }
+};
 
 pub const Item = struct {
     const Self = @This();

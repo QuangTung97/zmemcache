@@ -1,9 +1,12 @@
 const std = @import("std");
 const types = @import("types.zig");
+const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
 const Item = types.Item;
 const Slab = types.SlabClass;
+const CasNum = types.CasNum;
+const ItemIter = zutil.Iterator(*Item);
 
 pub fn LruFuncs(T: type) type {
     return struct {
@@ -79,6 +82,8 @@ pub const FakeLruService = struct {
 
     pub fn deleteItem(_: *Self, _: Slab, _: *Item) void {}
 
+    pub fn iterateItems(_: *Self, _: Slab, _: ItemIter) void {}
+
     pub fn putFreeItem(_: *Self, _: Slab, _: *Item) void {}
 
     pub fn getFreeItem(_: *Self, _: Slab) ?*Item {
@@ -112,4 +117,25 @@ test "lock & unlock" {
     // unlock
     s.unlockSlab(&fake, slab1);
     try expectEqual(false, s.isSlabLocked(&fake, slab1));
+}
+
+test "lru list" {
+    const gpa = std.testing.allocator;
+    var s = FakeLruService.init(gpa);
+    defer s.deinit();
+
+    const slab1 = Slab.init(11);
+
+    var item1: Item = undefined;
+    item1.cas_num = CasNum.init(41);
+
+    var item2: Item = undefined;
+    item2.cas_num = CasNum.init(42);
+
+    var item3: Item = undefined;
+    item3.cas_num = CasNum.init(43);
+
+    s.putItem(slab1, &item1);
+    s.putItem(slab1, &item2);
+    s.putItem(slab1, &item3);
 }

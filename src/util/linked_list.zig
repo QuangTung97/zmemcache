@@ -48,6 +48,19 @@ pub const ListHead = struct {
         item.next = head;
     }
 
+    pub fn popFront(head: *Self) ?*ListHead {
+        const item = head.next;
+        if (item == head) {
+            return null;
+        }
+
+        const next = item.next;
+        next.prev = head;
+        head.next = next;
+
+        return item;
+    }
+
     pub fn remove(self: *Self) void {
         const next = self.next;
         const prev = self.prev;
@@ -92,6 +105,32 @@ const TestEntry = struct {
 
 const expectEqual = std.testing.expectEqual;
 
+fn expectEntryValue(null_node: ?*ListHead, value: u64) !void {
+    try std.testing.expect(null_node != null);
+    if (null_node) |n| {
+        const entry = TestEntry.fromList(n);
+        try expectEqual(value, entry.value);
+    }
+}
+
+fn expectIterValues(expected: []const u64, iter: anytype) !void {
+    const gpa = std.testing.allocator;
+    var values = std.ArrayList(u64).empty;
+    defer values.deinit(gpa);
+
+    while (iter.next()) |node| {
+        const entry = TestEntry.fromList(node);
+        try values.append(gpa, entry.value);
+    }
+
+    try std.testing.expectEqualSlices(u64, expected, values.items);
+}
+
+fn expectListValues(expected: []const u64, head: *ListHead) !void {
+    var iter = head.iterate();
+    try expectIterValues(expected, &iter);
+}
+
 test "normal" {
     const gpa = std.testing.allocator;
 
@@ -110,43 +149,23 @@ test "normal" {
     var values = ValueList.empty;
     defer values.deinit(gpa);
 
-    // iterate backward
-    var iter = head.iterate();
-    while (iter.next()) |x| {
-        const entry = TestEntry.fromList(x);
-        try values.append(gpa, entry.value);
-    }
-
-    const values01 = [_]u64{ 21, 22, 23 };
-    try std.testing.expectEqualSlices(u64, &values01, values.items);
+    // iterate forward
+    var iter1 = head.iterate();
+    try expectIterValues(&.{ 21, 22, 23 }, &iter1);
 
     // iterate backward
     var iter2 = head.iterateBackward();
-    values.clearRetainingCapacity();
-    while (iter2.next()) |x| {
-        const entry = TestEntry.fromList(x);
-        try values.append(gpa, entry.value);
-    }
-    const values02 = [_]u64{ 23, 22, 21 };
-    try std.testing.expectEqualSlices(u64, &values02, values.items);
+    try expectIterValues(&.{ 23, 22, 21 }, &iter2);
 
     // remove in middle
     e2.list.remove();
 
     // iterate again
     var iter3 = head.iterate();
-    values.clearRetainingCapacity();
-    while (iter3.next()) |x| {
-        const entry = TestEntry.fromList(x);
-        try values.append(gpa, entry.value);
-    }
-    const values03 = [_]u64{ 21, 23 };
-    try std.testing.expectEqualSlices(u64, &values03, values.items);
+    try expectIterValues(&.{ 21, 23 }, &iter3);
 }
 
 test "add then remove all" {
-    const gpa = std.testing.allocator;
-
     var head: ListHead = undefined;
     head.initHeader();
 
@@ -163,17 +182,28 @@ test "add then remove all" {
     e3.list.remove();
     e1.list.remove();
 
-    // init values
-    const ValueList = std.ArrayList(u64);
-    var values = ValueList.empty;
-    defer values.deinit(gpa);
-
-    // iterate again
+    // get all
     var iter1 = head.iterate();
-    while (iter1.next()) |x| {
-        const entry = TestEntry.fromList(x);
-        try values.append(gpa, entry.value);
-    }
-    const values01 = [_]u64{};
-    try std.testing.expectEqualSlices(u64, &values01, values.items);
+    try expectIterValues(&.{}, &iter1);
+}
+
+test "pop front" {
+    var head: ListHead = undefined;
+    head.initHeader();
+
+    var e1 = TestEntry.init(21);
+    var e2 = TestEntry.init(22);
+    var e3 = TestEntry.init(23);
+
+    head.pushBack(&e1.list);
+    head.pushBack(&e2.list);
+    head.pushBack(&e3.list);
+
+    try expectEntryValue(head.popFront(), 21);
+
+    try expectListValues(&.{22, 23}, &head);
+
+    try expectEntryValue(head.popFront(), 22);
+    try expectEntryValue(head.popFront(), 23);
+    try std.testing.expect(head.popFront() == null);
 }

@@ -129,15 +129,14 @@ test "fake item locks" {
     try expectEqual(true, m.isLocked(&obj, LockSlot.init(13)));
 
     // check actions
-    const expectedActions = [_]LockAction{
-        LockAction{ .action = .lock, .hash = 11 },
-        LockAction{ .action = .lock, .hash = 12 },
-        LockAction{ .action = .tryLock, .hash = 13 },
-        LockAction{ .action = .unlock, .hash = 11 },
-    };
     try std.testing.expectEqualSlices(
         LockAction,
-        expectedActions[0..],
+        &.{
+            LockAction{ .action = .lock, .hash = 11 },
+            LockAction{ .action = .lock, .hash = 12 },
+            LockAction{ .action = .tryLock, .hash = 13 },
+            LockAction{ .action = .unlock, .hash = 11 },
+        },
         obj.actions.items,
     );
 }

@@ -3,10 +3,13 @@ const types = @import("types.zig");
 const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
+
+const ItemIter = zutil.Iterator(*Item);
+const ListHead = zutil.ListHead;
+
 const Item = types.Item;
 const Slab = types.SlabClass;
 const CasNum = types.CasNum;
-const ItemIter = zutil.Iterator(*Item);
 
 pub fn LruFuncs(T: type) type {
     return struct {
@@ -17,7 +20,7 @@ pub fn LruFuncs(T: type) type {
         putItem: fn (self: *T, slab: Slab, item: *Item) void,
         touchItem: fn (self: *T, slab: Slab, item: *Item) void,
         deleteItem: fn (self: *T, slab: Slab, item: *Item) void,
-        // iterateLru: fn (self: *T, slab: Slab) LruIter, TODO add back
+        iterateItems: fn (self: *T, slab: Slab, iterator: ItemIter) void,
 
         putFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
         getFreeItem: fn (self: *T, slab: Slab) ?*Item,
@@ -35,6 +38,7 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
         .putItem = T.putItem,
         .touchItem = T.touchItem,
         .deleteItem = T.deleteItem,
+        .iterateItems = T.iterateItems,
 
         .putFreeItem = T.putFreeItem,
         .getFreeItem = T.getFreeItem,
@@ -46,20 +50,34 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
 // ===========================================================================
 
 pub const FakeLruService = struct {
-    const LockedSetType = std.AutoHashMap(Slab, struct {});
-    lockedSet: LockedSetType,
-
     const Self = @This();
+    const LockedSetType = std.AutoHashMap(Slab, struct {});
+    const SlabMap = std.AutoHashMap(Slab, *ListHead);
+
+    gpa: Allocator,
+    lockedSet: LockedSetType,
+    slabMap: SlabMap,
 
     pub fn init(gpa: Allocator) Self {
         const lockedSet = LockedSetType.init(gpa);
+        const slabMap = SlabMap.init(gpa);
+
         return .{
+            .gpa = gpa,
             .lockedSet = lockedSet,
+            .slabMap = slabMap,
         };
     }
 
     pub fn deinit(self: *Self) void {
         self.lockedSet.deinit();
+
+        var iter = self.slabMap.iterator();
+        while (iter.next()) |entry| {
+            self.gpa.destroy(entry.value_ptr.*);
+        }
+
+        self.slabMap.deinit();
     }
 
     pub fn lockSlab(self: *Self, slab: Slab) void {
@@ -76,18 +94,45 @@ pub const FakeLruService = struct {
         return self.lockedSet.contains(slab);
     }
 
-    pub fn putItem(_: *Self, _: Slab, _: *Item) void {}
+    pub fn putItem(self: *Self, slab: Slab, item: *Item) void {
+        const head = self.getSlabList(slab);
+        head.pushBack(&item.lru_list);
+    }
 
     pub fn touchItem(_: *Self, _: Slab, _: *Item) void {}
 
     pub fn deleteItem(_: *Self, _: Slab, _: *Item) void {}
 
-    pub fn iterateItems(_: *Self, _: Slab, _: ItemIter) void {}
+    pub fn iterateItems(self: *Self, slab: Slab, iterator: ItemIter) void {
+        const head = self.getSlabList(slab);
+        var iter = head.iterate();
+        while (iter.next()) |node| {
+            const item = Item.fromList(node);
+            const ok = iterator.yield(item);
+            if (!ok) {
+                return;
+            }
+        }
+    }
 
     pub fn putFreeItem(_: *Self, _: Slab, _: *Item) void {}
 
     pub fn getFreeItem(_: *Self, _: Slab) ?*Item {
         return null;
+    }
+
+    fn getSlabList(self: *Self, slab: Slab) *ListHead {
+        const null_list = self.slabMap.get(slab);
+        if (null_list) |head| {
+            return head;
+        }
+
+        var head = self.gpa.create(ListHead) catch unreachable;
+        head.initHeader();
+
+        self.slabMap.put(slab, head) catch unreachable;
+
+        return head;
     }
 };
 
@@ -138,4 +183,22 @@ test "lru list" {
     s.putItem(slab1, &item1);
     s.putItem(slab1, &item2);
     s.putItem(slab1, &item3);
+
+    // check iterate through items
+    const CasList = std.ArrayList(u64);
+    var ctx = struct {
+        values: CasList,
+        pub fn yield(self: *@This(), item: *Item) bool {
+            self.values.append(gpa, item.cas_num.cas) catch unreachable;
+            return true;
+        }
+        fn deinit(self: *@This()) void {
+            self.values.deinit(gpa);
+        }
+    }{
+        .values = CasList.empty,
+    };
+    defer ctx.deinit();
+    s.iterateItems(slab1, ItemIter.init(&ctx));
+    try std.testing.expectEqualSlices(u64, &.{ 41, 42, 43 }, ctx.values.items);
 }

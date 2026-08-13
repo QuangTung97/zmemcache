@@ -8,6 +8,7 @@ const zpage = @import("page.zig");
 const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
 const Item = types.Item;
+const SlabClass = types.SlabClass;
 const SlabClassConfig = zslab.SlabClassConfig;
 
 const HashTable = struct {
@@ -87,26 +88,66 @@ pub fn ItemService(
         }
 
         pub fn put(self: *Self, key: []const u8) ?ItemSetter {
+            // compute hash value & lock slot
             const hash_value = HashFunc.hashKey(self._hasher, key);
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
-            ItemLocks.lock(self._locker, lock_slot);
-            defer ItemLocks.unlock(self._locker, lock_slot);
-
+            // compute slab class & item size
             const raw_item_size = Item.Size + key.len;
             const slab_size = self._slab_conf.getSlab(raw_item_size);
             const slab = slab_size.slab_class;
             const item_size = slab_size.item_size;
 
+            // lock with item locks
+            ItemLocks.lock(self._locker, lock_slot);
+            defer ItemLocks.unlock(self._locker, lock_slot);
+
+            // lock slab
             LruFuncs.lockSlab(self._lru, slab);
             defer LruFuncs.unlockSlab(self._lru, slab);
 
-            // TODO get from free list first
+            const null_item = self.getFreeItem(slab, item_size);
+            if (null_item) |it| {
+                return .{
+                    .hash = hash_value,
+                    .item = it,
+                };
+            } else {
+                return null;
+            }
+        }
 
+        pub fn finishPut(_: *Self, _: ItemSetter) void {}
+
+        pub fn get(_: *Self, _: []const u8) ItemGetter {
+            return .{
+                .NotFound = .{},
+            };
+        }
+
+        fn getFreeItem(self: *Self, slab: SlabClass, item_size: usize) ?*Item {
+            const null_item = LruFuncs.getFreeItem(self._lru, slab);
+            if (null_item) |it| {
+                return it;
+            }
+
+            // try to get new page from page pool
+            self.getNewPageFromPool(slab, item_size);
+
+            const new_null_item = LruFuncs.getFreeItem(self._lru, slab);
+            if (new_null_item) |it| {
+                return it;
+            }
+
+            return null;
+        }
+
+        fn getNewPageFromPool(self: *Self, slab: SlabClass, item_size: usize) void {
             std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab));
+
             const null_page = self._pager.allocPage(slab);
             const page = if (null_page) |p| p else {
-                return null;
+                return;
             };
 
             const IterateCtx = struct {
@@ -128,23 +169,7 @@ pub fn ItemService(
                 IterateCtx.yield,
             );
 
-            const null_item = LruFuncs.getFreeItem(self._lru, slab);
-            const result_item = if (null_item) |it| it else {
-                return null;
-            };
-
-            return .{
-                .hash = hash_value,
-                .item = result_item,
-            };
-        }
-
-        pub fn finishPut(_: *Self, _: ItemSetter) void {}
-
-        pub fn get(_: *Self, _: []const u8) ItemGetter {
-            return .{
-                .NotFound = .{},
-            };
+            // TODO add page to the slab
         }
     };
 }

@@ -18,6 +18,8 @@ pub fn LruFuncs(T: type) type {
 
         putFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
         getFreeItem: fn (self: *T, slab: Slab) ?*Item,
+
+        // TODO add push page and pop page
     };
 }
 

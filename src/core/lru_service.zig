@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const zutil = @import("zutil");
+const zpage = @import("page.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -10,6 +11,7 @@ const ListHead = zutil.ListHead;
 const Item = types.Item;
 const Slab = types.SlabClass;
 const CasNum = types.CasNum;
+const PageNum = zpage.PageNum;
 
 pub fn LruFuncs(T: type) type {
     return struct {
@@ -25,7 +27,8 @@ pub fn LruFuncs(T: type) type {
         putFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
         getFreeItem: fn (self: *T, slab: Slab) ?*Item,
 
-        // TODO add push page and pop page
+        pushPage: fn (self: *T, slab: Slab, page: PageNum) void,
+        popPage: fn (self: *T, slab: Slab) ?PageNum,
     };
 }
 
@@ -42,6 +45,9 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
 
         .putFreeItem = T.putFreeItem,
         .getFreeItem = T.getFreeItem,
+
+        .pushPage = T.pushPage,
+        .popPage = T.popPage,
     };
 }
 
@@ -53,29 +59,35 @@ pub const FakeLruService = struct {
     const Self = @This();
     const LockedSetType = std.AutoHashMap(Slab, struct {});
     const SlabMap = std.AutoHashMap(Slab, *ListHead);
+    const PageQueue = std.Deque(PageNum);
+    const PageQueueMap = std.AutoHashMap(Slab, *PageQueue);
 
     gpa: Allocator,
     locked_set: LockedSetType,
     lru_map: SlabMap,
     free_map: SlabMap,
+    page_queue_map: PageQueueMap,
 
     pub fn init(gpa: Allocator) Self {
         const locked_set = LockedSetType.init(gpa);
         const lru_map = SlabMap.init(gpa);
         const free_map = SlabMap.init(gpa);
+        const page_queue_map = PageQueueMap.init(gpa);
 
         return .{
             .gpa = gpa,
             .locked_set = locked_set,
             .lru_map = lru_map,
             .free_map = free_map,
+            .page_queue_map = page_queue_map,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.locked_set.deinit();
-        destroyMap(self.gpa, &self.lru_map);
+        self.destroyPageQueueMap();
         destroyMap(self.gpa, &self.free_map);
+        destroyMap(self.gpa, &self.lru_map);
+        self.locked_set.deinit();
     }
 
     fn destroyMap(gpa: Allocator, input_map: *SlabMap) void {
@@ -84,6 +96,15 @@ pub const FakeLruService = struct {
             gpa.destroy(entry.value_ptr.*);
         }
         input_map.deinit();
+    }
+
+    fn destroyPageQueueMap(self: *Self) void {
+        var iter = self.page_queue_map.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.*.deinit(self.gpa);
+            self.gpa.destroy(entry.value_ptr.*);
+        }
+        self.page_queue_map.deinit();
     }
 
     pub fn lockSlab(self: *Self, slab: Slab) void {
@@ -155,6 +176,29 @@ pub const FakeLruService = struct {
         head.initHeader();
         input_map.put(slab, head) catch unreachable;
         return head;
+    }
+
+    pub fn pushPage(self: *Self, slab: Slab, page: PageNum) void {
+        const queue = self.getPageQueue(slab);
+        queue.pushBack(self.gpa, page) catch unreachable;
+    }
+
+    pub fn popPage(self: *Self, slab: Slab) ?PageNum {
+        const queue = self.getPageQueue(slab);
+        return queue.popFront();
+    }
+
+    fn getPageQueue(self: *Self, slab: Slab) *PageQueue {
+        const null_queue = self.page_queue_map.get(slab);
+        if (null_queue) |q| {
+            return q;
+        }
+
+        const queue = self.gpa.create(PageQueue) catch unreachable;
+        queue.* = PageQueue.empty;
+        self.page_queue_map.put(slab, queue) catch unreachable;
+
+        return queue;
     }
 };
 
@@ -264,4 +308,24 @@ test "free list" {
     try expectItemValue(42, s.getFreeItem(slab1));
     try expectItemValue(41, s.getFreeItem(slab1));
     try expectEqual(null, s.getFreeItem(slab1));
+}
+
+test "page queue" {
+    const gpa = std.testing.allocator;
+    var s = FakeLruService.init(gpa);
+    defer s.deinit();
+
+    const slab1 = Slab.init(11);
+    const slab2 = Slab.init(12);
+
+    s.pushPage(slab1, PageNum.init(21));
+    s.pushPage(slab1, PageNum.init(22));
+    s.pushPage(slab1, PageNum.init(23));
+
+    try expectEqual(null, s.popPage(slab2));
+
+    try expectEqual(PageNum.init(21), s.popPage(slab1));
+    try expectEqual(PageNum.init(22), s.popPage(slab1));
+    try expectEqual(PageNum.init(23), s.popPage(slab1));
+    try expectEqual(null, s.popPage(slab1));
 }

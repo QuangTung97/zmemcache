@@ -5,7 +5,13 @@ const Item = types.Item;
 
 pub const Page = []u8;
 
-pub const PageNum = struct { page_num: u64 };
+pub const PageNum = struct {
+    page_num: u64,
+    pub fn init(x: u64) @This() {
+        return .{ .page_num = x };
+    }
+};
+
 pub const MaxSlab: u32 = 0xffffffff;
 
 pub const GlobalPager = struct {

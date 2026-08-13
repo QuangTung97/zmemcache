@@ -87,13 +87,13 @@ pub fn ItemService(
             self._table.deinit();
         }
 
-        pub fn put(self: *Self, key: []const u8) ?ItemSetter {
+        pub fn put(self: *Self, key: []const u8, value_len: usize) ?ItemSetter {
             // compute hash value & lock slot
             const hash_value = HashFunc.hashKey(self._hasher, key);
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
             // compute slab class & item size
-            const raw_item_size = Item.Size + key.len;
+            const raw_item_size = Item.getItemSize(key.len, value_len);
             const slab_size = self._slab_conf.getSlab(raw_item_size);
             const slab = slab_size.slab_class;
             const item_size = slab_size.item_size;
@@ -260,7 +260,7 @@ test "item service" {
     // setup hash values
     s.hash_func.addKeyHash(key01, hash1);
 
-    const setter1 = s.svc.put(key01);
+    const setter1 = s.svc.put(key01, 5);
     try std.testing.expect(setter1 != null);
     // TODO handle
 

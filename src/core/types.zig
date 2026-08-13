@@ -19,9 +19,9 @@ pub const ItemFlags = packed struct {
 pub const RefCount = struct { refcount: u32 };
 
 pub const CasNum = struct {
-    cas: u64 ,
+    cas: u64,
     pub fn init(x: u64) @This() {
-        return .{.cas = x};
+        return .{ .cas = x };
     }
 };
 
@@ -59,6 +59,10 @@ pub const Item = struct {
     pub fn getValue(self: *Self) []u8 {
         const value_addr = self.getKeyAddr() + self.key_len;
         return value_addr[0..self.value_len];
+    }
+
+    pub fn getItemSize(key_len: usize, value_len: usize) usize {
+        return Size + key_len + value_len;
     }
 
     pub fn fromList(entry: *ListHead) *Self {
@@ -147,6 +151,22 @@ test "check item size" {
     try expectEqual(false, Item.Alignment.check(19));
     try expectEqual(false, Item.Alignment.check(20));
     try expectEqual(true, Item.Alignment.check(24));
+}
+
+test "item getter" {
+    var item: Item = undefined;
+    item.key_len = 11;
+    item.value_len = 22;
+
+    const base_addr: [*]u8 = @ptrCast(&item);
+    const key = item.getKey();
+
+    try expectEqual(11, key.len);
+    try expectEqual(Item.Size, key.ptr - base_addr);
+
+    const val = item.getValue();
+    try expectEqual(22, val.len);
+    try expectEqual(Item.Size + 11, val.ptr - base_addr);
 }
 
 test "check lru list" {

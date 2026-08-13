@@ -201,16 +201,9 @@ test "basic" {
     try expectEqual(1, num2.page_num);
     try expectEqual(12, g.getSlabClass(num2).slab);
 
+    // check get page number
     const item3: *Item = @ptrCast(@alignCast(p3));
-    // check item getters
-    item3.key_len = 31;
-    item3.value_len = 51;
-    const item3_base: [*]u8 = @ptrCast(item3);
     try expectEqual(2, g.getPageNumOfItem(item3).page_num);
-    try expectEqual(31, item3.getKey().len);
-    try expectEqual(Item.Size, &item3.getKey()[0] - item3_base);
-    try expectEqual(51, item3.getValue().len);
-    try expectEqual(Item.Size + 31, &item3.getValue()[0] - item3_base);
 
     // test iterate
     const page1 = p1.?;

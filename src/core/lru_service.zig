@@ -101,7 +101,9 @@ pub const FakeLruService = struct {
 
     pub fn touchItem(_: *Self, _: Slab, _: *Item) void {}
 
-    pub fn deleteItem(_: *Self, _: Slab, _: *Item) void {}
+    pub fn deleteItem(_: *Self, _: Slab, item: *Item) void {
+        item.lru_list.remove();
+    }
 
     pub fn iterateItems(self: *Self, slab: Slab, iterator: ItemIter) void {
         const head = self.getSlabList(slab);
@@ -164,28 +166,17 @@ test "lock & unlock" {
     try expectEqual(false, s.isSlabLocked(&fake, slab1));
 }
 
-test "lru list" {
+fn newItem(v: u64) Item {
+    var item: Item = undefined;
+    item.cas_num = CasNum.init(v);
+    return item;
+}
+
+fn expectLruList(expected: []const u64, s: *FakeLruService, slab: Slab) !void {
     const gpa = std.testing.allocator;
-    var s = FakeLruService.init(gpa);
-    defer s.deinit();
 
-    const slab1 = Slab.init(11);
-
-    var item1: Item = undefined;
-    item1.cas_num = CasNum.init(41);
-
-    var item2: Item = undefined;
-    item2.cas_num = CasNum.init(42);
-
-    var item3: Item = undefined;
-    item3.cas_num = CasNum.init(43);
-
-    s.putItem(slab1, &item1);
-    s.putItem(slab1, &item2);
-    s.putItem(slab1, &item3);
-
-    // check iterate through items
     const CasList = std.ArrayList(u64);
+
     var ctx = struct {
         values: CasList,
         pub fn yield(self: *@This(), item: *Item) bool {
@@ -199,6 +190,32 @@ test "lru list" {
         .values = CasList.empty,
     };
     defer ctx.deinit();
-    s.iterateItems(slab1, ItemIter.init(&ctx));
-    try std.testing.expectEqualSlices(u64, &.{ 41, 42, 43 }, ctx.values.items);
+
+    s.iterateItems(slab, ItemIter.init(&ctx));
+
+    try std.testing.expectEqualSlices(u64, expected, ctx.values.items);
+}
+
+test "lru list" {
+    const gpa = std.testing.allocator;
+    var s = FakeLruService.init(gpa);
+    defer s.deinit();
+
+    const slab1 = Slab.init(11);
+
+    var item1 = newItem(41);
+    var item2 = newItem(42);
+    var item3 = newItem(43);
+
+    s.putItem(slab1, &item1);
+    s.putItem(slab1, &item2);
+    s.putItem(slab1, &item3);
+
+    // check iterate through items
+    try expectLruList(&.{41, 42, 43}, &s, slab1);
+
+    s.deleteItem(slab1, &item2);
+
+    // check iterate through items
+    try expectLruList(&.{41, 43}, &s, slab1);
 }

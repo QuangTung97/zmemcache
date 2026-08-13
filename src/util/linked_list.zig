@@ -61,6 +61,19 @@ pub const ListHead = struct {
         return item;
     }
 
+    pub fn popBack(head: *Self) ?*ListHead {
+        const item = head.prev;
+        if (item == head) {
+            return null;
+        }
+
+        const prev = item.prev;
+        prev.next = head;
+        head.prev = prev;
+
+        return item;
+    }
+
     pub fn remove(self: *Self) void {
         const next = self.next;
         const prev = self.prev;
@@ -201,9 +214,30 @@ test "pop front" {
 
     try expectEntryValue(head.popFront(), 21);
 
-    try expectListValues(&.{22, 23}, &head);
+    try expectListValues(&.{ 22, 23 }, &head);
 
     try expectEntryValue(head.popFront(), 22);
     try expectEntryValue(head.popFront(), 23);
     try std.testing.expect(head.popFront() == null);
+}
+
+test "pop back" {
+    var head: ListHead = undefined;
+    head.initHeader();
+
+    var e1 = TestEntry.init(21);
+    var e2 = TestEntry.init(22);
+    var e3 = TestEntry.init(23);
+
+    head.pushBack(&e1.list);
+    head.pushBack(&e2.list);
+    head.pushBack(&e3.list);
+
+    try expectEntryValue(head.popBack(), 23);
+
+    try expectListValues(&.{ 21, 22}, &head);
+
+    try expectEntryValue(head.popBack(), 22);
+    try expectEntryValue(head.popBack(), 21);
+    try std.testing.expect(head.popBack() == null);
 }

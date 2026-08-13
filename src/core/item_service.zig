@@ -261,7 +261,8 @@ test "item service" {
     s.hash_func.addKeyHash(key01, hash1);
 
     const setter1 = s.svc.put(key01);
-    try std.testing.expect(setter1 == null); // TODO not null
+    try std.testing.expect(setter1 != null);
+    // TODO handle
 
     // const g1 = s.svc.get(key01);
     // try expectEqual(null, g1);

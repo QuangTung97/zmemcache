@@ -55,47 +55,53 @@ pub const FakeLruService = struct {
     const SlabMap = std.AutoHashMap(Slab, *ListHead);
 
     gpa: Allocator,
-    lockedSet: LockedSetType,
-    slabMap: SlabMap,
+    locked_set: LockedSetType,
+    lru_map: SlabMap,
+    free_map: SlabMap,
 
     pub fn init(gpa: Allocator) Self {
-        const lockedSet = LockedSetType.init(gpa);
-        const slabMap = SlabMap.init(gpa);
+        const locked_set = LockedSetType.init(gpa);
+        const lru_map = SlabMap.init(gpa);
+        const free_map = SlabMap.init(gpa);
 
         return .{
             .gpa = gpa,
-            .lockedSet = lockedSet,
-            .slabMap = slabMap,
+            .locked_set = locked_set,
+            .lru_map = lru_map,
+            .free_map = free_map,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        self.lockedSet.deinit();
+        self.locked_set.deinit();
+        destroyMap(self.gpa, &self.lru_map);
+        destroyMap(self.gpa, &self.free_map);
+    }
 
-        var iter = self.slabMap.iterator();
+    fn destroyMap(gpa: Allocator, input_map: *SlabMap) void {
+        var iter = input_map.iterator();
         while (iter.next()) |entry| {
-            self.gpa.destroy(entry.value_ptr.*);
+            gpa.destroy(entry.value_ptr.*);
         }
-
-        self.slabMap.deinit();
+        input_map.deinit();
     }
 
     pub fn lockSlab(self: *Self, slab: Slab) void {
-        std.debug.assert(!self.lockedSet.contains(slab));
-        self.lockedSet.put(slab, .{}) catch unreachable;
+        std.debug.assert(!self.locked_set.contains(slab));
+        self.locked_set.put(slab, .{}) catch unreachable;
     }
 
     pub fn unlockSlab(self: *Self, slab: Slab) void {
-        const ok = self.lockedSet.remove(slab);
+        const ok = self.locked_set.remove(slab);
         std.debug.assert(ok);
     }
 
     pub fn isSlabLocked(self: *Self, slab: Slab) bool {
-        return self.lockedSet.contains(slab);
+        return self.locked_set.contains(slab);
     }
 
     pub fn putItem(self: *Self, slab: Slab, item: *Item) void {
-        const head = self.getSlabList(slab);
+        const head = self.getLruList(slab);
         head.pushBack(&item.lru_list);
     }
 
@@ -106,7 +112,7 @@ pub const FakeLruService = struct {
     }
 
     pub fn iterateItems(self: *Self, slab: Slab, iterator: ItemIter) void {
-        const head = self.getSlabList(slab);
+        const head = self.getLruList(slab);
         var iter = head.iterate();
         while (iter.next()) |node| {
             const item = Item.fromList(node);
@@ -117,23 +123,37 @@ pub const FakeLruService = struct {
         }
     }
 
-    pub fn putFreeItem(_: *Self, _: Slab, _: *Item) void {}
+    pub fn putFreeItem(self: *Self, slab: Slab, item: *Item) void {
+        const head = self.getFreeList(slab);
+        head.pushBack(&item.lru_list);
+    }
 
-    pub fn getFreeItem(_: *Self, _: Slab) ?*Item {
+    pub fn getFreeItem(self: *Self, slab: Slab) ?*Item {
+        const head = self.getFreeList(slab);
+        const null_node = head.popBack();
+        if (null_node) |node| {
+            return Item.fromList(node);
+        }
         return null;
     }
 
-    fn getSlabList(self: *Self, slab: Slab) *ListHead {
-        const null_list = self.slabMap.get(slab);
+    fn getLruList(self: *Self, slab: Slab) *ListHead {
+        return getMapNodeList(self.gpa, &self.lru_map, slab);
+    }
+
+    fn getFreeList(self: *Self, slab: Slab) *ListHead {
+        return getMapNodeList(self.gpa, &self.free_map, slab);
+    }
+
+    fn getMapNodeList(gpa: Allocator, input_map: *SlabMap, slab: Slab) *ListHead {
+        const null_list = input_map.get(slab);
         if (null_list) |head| {
             return head;
         }
 
-        var head = self.gpa.create(ListHead) catch unreachable;
+        var head = gpa.create(ListHead) catch unreachable;
         head.initHeader();
-
-        self.slabMap.put(slab, head) catch unreachable;
-
+        input_map.put(slab, head) catch unreachable;
         return head;
     }
 };
@@ -212,10 +232,35 @@ test "lru list" {
     s.putItem(slab1, &item3);
 
     // check iterate through items
-    try expectLruList(&.{41, 42, 43}, &s, slab1);
+    try expectLruList(&.{ 41, 42, 43 }, &s, slab1);
 
     s.deleteItem(slab1, &item2);
 
     // check iterate through items
-    try expectLruList(&.{41, 43}, &s, slab1);
+    try expectLruList(&.{ 41, 43 }, &s, slab1);
+}
+
+fn expectItemValue(value: u64, item: ?*Item) !void {
+    try std.testing.expect(item != null);
+    if (item) |x| {
+        try expectEqual(value, x.cas_num.cas);
+    }
+}
+
+test "free list" {
+    const gpa = std.testing.allocator;
+    var s = FakeLruService.init(gpa);
+    defer s.deinit();
+
+    const slab1 = Slab.init(11);
+
+    var item1 = newItem(41);
+    var item2 = newItem(42);
+    var item3 = newItem(43);
+
+    s.putFreeItem(slab1, &item1);
+    s.putFreeItem(slab1, &item2);
+    s.putFreeItem(slab1, &item3);
+
+    try expectItemValue(43, s.getFreeItem(slab1));
 }

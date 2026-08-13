@@ -6,13 +6,13 @@ const Item = types.Item;
 const SlabClass = types.SlabClass;
 
 pub const SlabSize = struct {
-    slab: SlabClass,
-    size: usize,
+    slab_class: SlabClass,
+    item_size: usize,
 
     pub fn init(slab: u32, size: usize) @This() {
         return .{
-            .slab = SlabClass.init(slab),
-            .size = size,
+            .slab_class = SlabClass.init(slab),
+            .item_size = size,
         };
     }
 };

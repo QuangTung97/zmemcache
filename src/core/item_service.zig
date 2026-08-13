@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const zslab = @import("slab_class.zig");
 const zlock = @import("item_lock.zig");
 const zlru = @import("lru_service.zig");
 const zpage = @import("page.zig");
@@ -7,6 +8,7 @@ const zpage = @import("page.zig");
 const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
 const Item = types.Item;
+const SlabClassConfig = zslab.SlabClassConfig;
 
 const HashTable = struct {
     gpa: std.mem.Allocator,
@@ -50,6 +52,7 @@ pub fn ItemService(
 ) type {
     return struct {
         _hasher: *H,
+        _slab_conf: *SlabClassConfig,
         _pager: *zpage.GlobalPager,
         _locker: *L,
         _lru: *S,
@@ -61,6 +64,7 @@ pub fn ItemService(
         pub fn init(
             gpa: std.mem.Allocator,
             hasher: *H,
+            slab_conf: *SlabClassConfig,
             pager: *zpage.GlobalPager,
             locker: *L,
             lru_svc: *S,
@@ -70,6 +74,7 @@ pub fn ItemService(
 
             return .{
                 ._hasher = hasher,
+                ._slab_conf = slab_conf,
                 ._pager = pager,
                 ._locker = locker,
                 ._lru = lru_svc,
@@ -88,8 +93,10 @@ pub fn ItemService(
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
-            const item_size = 128; // TODO
-            const slab = types.SlabClass{ .slab = 11 }; // TODO
+            const raw_item_size = Item.Size + key.len;
+            const slab_size = self._slab_conf.getSlab(raw_item_size);
+            const slab = slab_size.slab_class;
+            const item_size = slab_size.item_size;
 
             LruFuncs.lockSlab(self._lru, slab);
             defer LruFuncs.unlockSlab(self._lru, slab);
@@ -170,6 +177,7 @@ const ServiceTest = struct {
 
     gpa: Allocator,
     hash_func: types.FakeHashFunc,
+    slab_conf: SlabClassConfig,
     pager: zpage.GlobalPager,
     locker: zlock.FakeItemLocks,
     lru_svc: zlru.FakeLruService,
@@ -183,6 +191,12 @@ const ServiceTest = struct {
 
         s.gpa = gpa;
         s.hash_func = types.FakeHashFunc.init(gpa);
+        s.slab_conf = try zslab.SlabClassConfig.init(
+            gpa,
+            96,
+            512,
+            1.5,
+        );
         s.pager = try zpage.GlobalPager.init(io, gpa, 3);
         s.locker = zlock.FakeItemLocks.init(gpa);
         s.lru_svc = zlru.FakeLruService.init(gpa);
@@ -190,6 +204,7 @@ const ServiceTest = struct {
         s.svc = try ServiceType.init(
             gpa,
             &s.hash_func,
+            &s.slab_conf,
             &s.pager,
             &s.locker,
             &s.lru_svc,
@@ -204,6 +219,7 @@ const ServiceTest = struct {
         self.lru_svc.deinit();
         self.locker.deinit();
         self.pager.deinit();
+        self.slab_conf.deinit();
         self.hash_func.deinit();
         self.gpa.destroy(self);
     }

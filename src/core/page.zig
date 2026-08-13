@@ -14,7 +14,7 @@ pub const PageNum = struct { page_num: u64 };
 pub const MaxSlab: u32 = 0xffffffff;
 
 pub const GlobalPager = struct {
-    private: struct {
+    priv: struct {
         io: std.Io,
         gpa: std.mem.Allocator,
 
@@ -39,7 +39,7 @@ pub const GlobalPager = struct {
         }
 
         return Self{
-            .private = .{
+            .priv = .{
                 .io = io,
                 .gpa = gpa,
                 .all_pages = all_pages,
@@ -51,12 +51,12 @@ pub const GlobalPager = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.private.gpa.free(self.private.all_pages);
-        self.private.gpa.free(self.private.pages_to_slab);
+        self.priv.gpa.free(self.priv.all_pages);
+        self.priv.gpa.free(self.priv.pages_to_slab);
     }
 
     pub fn allocPage(self: *Self, slab: types.SlabClass) ?*Page {
-        const this = &self.private;
+        const this = &self.priv;
 
         var num_empty = this.num_empty_pages.load(.seq_cst);
         if (num_empty == 0) {
@@ -83,7 +83,7 @@ pub const GlobalPager = struct {
     }
 
     pub fn getPageNumOfItem(self: Self, item: *Item) PageNum {
-        const this = self.private;
+        const this = self.priv;
         const base_addr: *u8 = @ptrCast(&this.all_pages[0]);
         const item_addr: *u8 = @ptrCast(item);
         const offset = item_addr - base_addr;
@@ -93,14 +93,14 @@ pub const GlobalPager = struct {
     }
 
     pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: types.SlabClass) void {
-        const this = &self.private;
+        const this = &self.priv;
         std.debug.assert(page_num.page_num < this.all_pages.len);
         this.pages_to_slab[page_num.page_num].store(slab.slab, .seq_cst);
     }
 
     pub fn getSlabClass(self: Self, page_num: PageNum) types.SlabClass {
         return .{
-            .slab = self.private.pages_to_slab[page_num.page_num].load(.seq_cst),
+            .slab = self.priv.pages_to_slab[page_num.page_num].load(.seq_cst),
         };
     }
 };
@@ -169,23 +169,23 @@ test "basic" {
     );
     defer g.deinit();
 
-    try expectEqual(3, g.private.all_pages.len);
-    try expectEqual(3, g.private.pages_to_slab.len);
-    try expectEqual(0xffff_ffff, g.private.pages_to_slab[0].load(.seq_cst));
-    try expectEqual(0xffff_ffff, g.private.pages_to_slab[2].load(.seq_cst));
+    try expectEqual(3, g.priv.all_pages.len);
+    try expectEqual(3, g.priv.pages_to_slab.len);
+    try expectEqual(0xffff_ffff, g.priv.pages_to_slab[0].load(.seq_cst));
+    try expectEqual(0xffff_ffff, g.priv.pages_to_slab[2].load(.seq_cst));
 
     // test allocate pages
     const p1 = g.allocPage(.{ .slab = 11 });
-    try expectEqual(&g.private.all_pages[0], p1);
-    try expectEqual(3, g.private.pages_to_slab.len);
+    try expectEqual(&g.priv.all_pages[0], p1);
+    try expectEqual(3, g.priv.pages_to_slab.len);
 
     const p2 = g.allocPage(.{ .slab = 12 });
-    try expectEqual(&g.private.all_pages[1], p2);
-    try expectEqual(11, g.private.pages_to_slab[0].load(.seq_cst));
-    try expectEqual(12, g.private.pages_to_slab[1].load(.seq_cst));
+    try expectEqual(&g.priv.all_pages[1], p2);
+    try expectEqual(11, g.priv.pages_to_slab[0].load(.seq_cst));
+    try expectEqual(12, g.priv.pages_to_slab[1].load(.seq_cst));
 
     const p3 = g.allocPage(.{ .slab = 13 });
-    try expectEqual(&g.private.all_pages[2], p3);
+    try expectEqual(&g.priv.all_pages[2], p3);
 
     const p4 = g.allocPage(.{ .slab = 14 });
     try expectEqual(null, p4);

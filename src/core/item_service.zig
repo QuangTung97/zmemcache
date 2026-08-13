@@ -49,12 +49,12 @@ pub fn ItemService(
     lru_funcs: zlru.LruFuncs(S),
 ) type {
     return struct {
-        hasher: *H,
-        pager: *zpage.GlobalPager,
-        locker: *L,
-        lru_svc: *S,
+        _hasher: *H,
+        _pager: *zpage.GlobalPager,
+        _locker: *L,
+        _lru: *S,
 
-        table: HashTable,
+        _table: HashTable,
 
         const Self = @This();
 
@@ -73,35 +73,35 @@ pub fn ItemService(
             const hash_table = try HashTable.init(gpa, hash_size_log);
 
             return .{
-                .hasher = hasher,
-                .pager = pager,
-                .locker = locker,
-                .lru_svc = lru_svc,
-                .table = hash_table,
+                ._hasher = hasher,
+                ._pager = pager,
+                ._locker = locker,
+                ._lru = lru_svc,
+                ._table = hash_table,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.table.deinit();
+            self._table.deinit();
         }
 
         pub fn put(self: *Self, key: []const u8) ?ItemSetter {
-            const hash_value = HashFunc.hashKey(self.hasher, key);
-            const lock_slot = ItemLocks.getSlot(self.locker, hash_value);
+            const hash_value = HashFunc.hashKey(self._hasher, key);
+            const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
-            ItemLocks.lock(self.locker, lock_slot);
-            defer ItemLocks.unlock(self.locker, lock_slot);
+            ItemLocks.lock(self._locker, lock_slot);
+            defer ItemLocks.unlock(self._locker, lock_slot);
 
             const item_size = 128; // TODO
             const slab = types.SlabClass{ .slab = 11 }; // TODO
 
-            LruFuncs.lockSlab(self.lru_svc, slab);
-            defer LruFuncs.unlockSlab(self.lru_svc, slab);
+            LruFuncs.lockSlab(self._lru, slab);
+            defer LruFuncs.unlockSlab(self._lru, slab);
 
             // TODO get from free list first
 
-            std.debug.assert(LruFuncs.isSlabLocked(self.lru_svc, slab));
-            const null_page = self.pager.allocPage(slab);
+            std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab));
+            const null_page = self._pager.allocPage(slab);
             const page = if (null_page) |p| p else {
                 return null;
             };
@@ -110,7 +110,7 @@ pub fn ItemService(
                 self: *Self,
                 slab: types.SlabClass,
                 fn yield(ctx: *@This(), item: *Item) bool {
-                    LruFuncs.putFreeItem(ctx.self.lru_svc, ctx.slab, item);
+                    LruFuncs.putFreeItem(ctx.self._lru, ctx.slab, item);
                     return true;
                 }
             };
@@ -125,7 +125,7 @@ pub fn ItemService(
                 IterateCtx.yield,
             );
 
-            const null_item = LruFuncs.getFreeItem(self.lru_svc, slab);
+            const null_item = LruFuncs.getFreeItem(self._lru, slab);
             const result_item = if (null_item) |it| it else {
                 return null;
             };

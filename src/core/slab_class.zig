@@ -61,10 +61,14 @@ pub const SlabClassConfig = struct {
         self._all_classes.deinit(self._gpa);
     }
 
-    pub fn getSlab(self: *Self, item_size: usize) SlabSize {
+    pub fn getItemSlab(self: *Self, item_size: usize) SlabSize {
         const index = self.lowerBound(item_size);
         const slab: u32 = @intCast(index);
         return .init(slab, self._all_classes.items[index]);
+    }
+
+    pub fn getSlabSize(self: *Self, slab: SlabClass) usize {
+        return self._all_classes.items[slab.slab];
     }
 
     fn compareFunc(key: usize, item: usize) std.math.Order {
@@ -100,13 +104,16 @@ test "normal" {
     }
 
     // get slab class
-    try expectEqual(SlabSize.init(0, 96), conf.getSlab(95));
-    try expectEqual(SlabSize.init(0, 96), conf.getSlab(50));
-    try expectEqual(SlabSize.init(0, 96), conf.getSlab(96));
-    try expectEqual(SlabSize.init(1, 144), conf.getSlab(97));
+    try expectEqual(SlabSize.init(0, 96), conf.getItemSlab(95));
+    try expectEqual(SlabSize.init(0, 96), conf.getItemSlab(50));
+    try expectEqual(SlabSize.init(0, 96), conf.getItemSlab(96));
+    try expectEqual(SlabSize.init(1, 144), conf.getItemSlab(97));
 
-    try expectEqual(SlabSize.init(4, 488), conf.getSlab(488));
-    try expectEqual(SlabSize.init(5, 736), conf.getSlab(489));
+    try expectEqual(SlabSize.init(4, 488), conf.getItemSlab(488));
+    try expectEqual(SlabSize.init(5, 736), conf.getItemSlab(489));
+
+    try expectEqual(96, conf.getSlabSize(SlabClass.init(0)));
+    try expectEqual(144, conf.getSlabSize(SlabClass.init(1)));
 }
 
 test "max size is included" {

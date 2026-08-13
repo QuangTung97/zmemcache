@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
 const Item = types.Item;
 const SlabClass = types.SlabClass;
+const CasNum = types.CasNum;
 const SlabClassConfig = zslab.SlabClassConfig;
 
 const HashTable = struct {
@@ -35,6 +36,7 @@ const HashTable = struct {
 
 pub const ItemSetter = struct {
     hash: HashValue,
+    slab: SlabClass,
     item: *Item,
 };
 
@@ -57,6 +59,7 @@ pub fn ItemService(
         _pager: *zpage.GlobalPager,
         _locker: *L,
         _lru: *S,
+        _last_cas: std.atomic.Value(u64),
 
         _table: HashTable,
 
@@ -80,6 +83,7 @@ pub fn ItemService(
                 ._locker = locker,
                 ._lru = lru_svc,
                 ._table = hash_table,
+                ._last_cas = .init(0),
             };
         }
 
@@ -93,8 +97,8 @@ pub fn ItemService(
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
             // compute slab class & item size
-            const raw_item_size = Item.getItemSize(key.len, value_len);
-            const slab_size = self._slab_conf.getSlab(raw_item_size);
+            const raw_item_size = Item.computeItemSize(key.len, value_len);
+            const slab_size = self._slab_conf.getItemSlab(raw_item_size);
             const slab = slab_size.slab_class;
             const item_size = slab_size.item_size;
 
@@ -108,8 +112,17 @@ pub fn ItemService(
 
             const null_item = self.getFreeItem(slab, item_size);
             if (null_item) |it| {
+                // init item
+                const cas_num = self.nextCasNum();
+                it.* = Item.init(key.len, value_len, cas_num);
+                it.item_flags.set_partial = true;
+
+                // copy the key
+                @memcpy(it.getKey(), key);
+
                 return .{
                     .hash = hash_value,
+                    .slab = slab,
                     .item = it,
                 };
             } else {
@@ -170,6 +183,11 @@ pub fn ItemService(
             );
 
             // TODO add page to the slab
+        }
+
+        fn nextCasNum(self: *Self) CasNum {
+            const num = self._last_cas.fetchAdd(1, .seq_cst);
+            return CasNum{ .cas = num + 1 };
         }
     };
 }
@@ -250,20 +268,32 @@ const ServiceTest = struct {
     }
 };
 
-test "item service" {
-    const s = try ServiceTest.init();
-    defer s.deinit();
+test "basic" {
+    const svc = try ServiceTest.init();
+    defer svc.deinit();
 
     const key01 = "key01";
     const hash1 = HashValue.init(21);
 
     // setup hash values
-    s.hash_func.addKeyHash(key01, hash1);
+    svc.hash_func.addKeyHash(key01, hash1);
 
-    const setter1 = s.svc.put(key01, 5);
+    // put1
+    const setter1 = svc.svc.put(key01, 46);
     try std.testing.expect(setter1 != null);
-    // TODO handle
+    if (setter1) |s| {
+        try expectEqual(hash1, s.hash);
+        try expectEqual(SlabClass.init(1), s.slab);
+        try expectEqual(144, svc.slab_conf.getSlabSize(s.slab));
 
-    // const g1 = s.svc.get(key01);
-    // try expectEqual(null, g1);
+        // check item key
+        try expectEqual(Item.Size + key01.len + 46, s.item.getItemSize());
+        try std.testing.expectEqualStrings(key01, s.item.getKey());
+
+        // check flags
+        try expectEqual(true, s.item.slab_flags.is_present);
+        try expectEqual(false, s.item.item_flags.is_deleting);
+        try expectEqual(true, s.item.item_flags.set_partial);
+        try expectEqual(1, s.item.refcount.refcount);
+    }
 }

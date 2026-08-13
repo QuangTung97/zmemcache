@@ -16,7 +16,12 @@ pub const ItemFlags = packed struct {
     set_partial: bool,
 };
 
-pub const RefCount = struct { refcount: u32 };
+pub const RefCount = struct {
+    refcount: u32 ,
+    pub fn init(x: u32) @This() {
+        return .{.refcount = x};
+    }
+};
 
 pub const CasNum = struct {
     cas: u64,
@@ -33,7 +38,7 @@ pub const Item = struct {
     slab_flags: SlabFlags, // protected by slab lock
     item_flags: ItemFlags, // protected by item lock
     key_len: u8, // constant
-    is_active: std.atomic.Value(bool), // set = true when touched
+    is_touched: std.atomic.Value(bool), // set = true when touched
 
     refcount: RefCount, // protected by item lock
     value_len: u32, // constant
@@ -45,6 +50,32 @@ pub const Item = struct {
     cas_num: CasNum, // protected by item lock
 
     // key data & item data are protected by item lock
+
+    pub fn init(key_len: usize, value_len: usize, cas: CasNum) Self {
+        const it: Self = .{
+            .slab_flags = SlabFlags{
+                .is_present = true,
+                .lru_list = .Hot,
+            },
+            .item_flags = ItemFlags{
+                .is_deleting = false,
+                .set_partial =  false,
+            },
+            .is_touched = .init(false),
+            .hash_next = null,
+            .lru_list = undefined,
+            .refcount = RefCount.init(1),
+            .cas_num = cas,
+
+            .key_len = @intCast(key_len),
+            .value_len = @intCast(value_len),
+        };
+
+        std.debug.assert(key_len <= std.math.maxInt(@TypeOf(it.key_len)));
+        std.debug.assert(value_len <= std.math.maxInt(@TypeOf(it.value_len)));
+
+        return it;
+    }
 
     fn getKeyAddr(self: *Self) [*]u8 {
         const base_addr: [*]u8 = @ptrCast(self);
@@ -61,7 +92,11 @@ pub const Item = struct {
         return value_addr[0..self.value_len];
     }
 
-    pub fn getItemSize(key_len: usize, value_len: usize) usize {
+    pub fn getItemSize(self: *Self) usize {
+        return Size + self.key_len + self.value_len;
+    }
+
+    pub fn computeItemSize(key_len: usize, value_len: usize) usize {
         return Size + key_len + value_len;
     }
 
@@ -167,6 +202,8 @@ test "item getter" {
     const val = item.getValue();
     try expectEqual(22, val.len);
     try expectEqual(Item.Size + 11, val.ptr - base_addr);
+
+    try expectEqual(48 + 11 + 22, item.getItemSize());
 }
 
 test "check lru list" {

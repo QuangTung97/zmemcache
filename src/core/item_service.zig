@@ -15,6 +15,8 @@ const LockSlot = types.LockSlot;
 const SlabClassConfig = zslab.SlabClassConfig;
 const ItemIter = zlru.ItemIter;
 
+// TODO validate hash table must bigger than item locks table
+
 const HashTable = struct {
     gpa: std.mem.Allocator,
     buckets: []?*types.Item,
@@ -211,6 +213,7 @@ pub fn ItemService(
                 slab: SlabClass,
                 current_slot: LockSlot,
                 pub fn yield(ctx: *@This(), item: *Item) bool {
+                    // TODO limit number of attempts
                     const ok = ctx.self.tryToEvictItem(
                         item,
                         ctx.slab,
@@ -234,6 +237,14 @@ pub fn ItemService(
 
         fn tryToEvictItem(self: *Self, item: *Item, slab: SlabClass, _: LockSlot) bool {
             self.assertSlabLocked(slab);
+
+            const new_hash = HashFunc.hashKey(self._hasher, item.getKey());
+            const new_slot = ItemLocks.getSlot(self._locker, new_hash);
+
+            ItemLocks.lock(self._locker, new_slot);
+            defer ItemLocks.unlock(self._locker, new_slot);
+
+
             LruFuncs.deleteItem(self._lru, slab, item);
             LruFuncs.putFreeItem(self._lru, slab, item);
             return true;
@@ -411,8 +422,17 @@ test "with eviction" {
     s.locker.actions.clearRetainingCapacity();
 
     const setter4 = s.svc.put(key04, 46).?;
+
+    // check actions
+    try std.testing.expectEqualSlices(zlock.LockAction, &.{
+        .{ .action = .Lock, .hash = hash4.hash },
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash4.hash },
+    }, s.locker.actions.items);
+
     s.svc.finishPut(setter4);
 
     // TODO check remain items
-    // TODO check lock actions
+    // TODO handle case same slot
 }

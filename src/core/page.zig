@@ -3,14 +3,9 @@ const types = @import("types.zig");
 
 const Item = types.Item;
 
-const PageSizeShift = 20;
-
-pub const PageSize = 1 << PageSizeShift; // 1MB
-
-pub const Page = [PageSize]u8;
+pub const Page = []u8;
 
 pub const PageNum = struct { page_num: u64 };
-
 pub const MaxSlab: u32 = 0xffffffff;
 
 pub const GlobalPager = struct {
@@ -18,7 +13,10 @@ pub const GlobalPager = struct {
         io: std.Io,
         gpa: std.mem.Allocator,
 
-        all_pages: []Page,
+        page_size: u64,
+        page_size_shift: u6,
+
+        all_pages: []u8,
         num_empty_pages: std.atomic.Value(u64),
         mut: std.Io.Mutex,
         pages_to_slab: []std.atomic.Value(u32),
@@ -26,11 +24,17 @@ pub const GlobalPager = struct {
 
     const Self = @This();
 
-    pub fn init(io: std.Io, gpa: std.mem.Allocator, num_pages: u64) !Self {
+    pub fn init(
+        io: std.Io,
+        gpa: std.mem.Allocator,
+        page_size_log: u6,
+        num_pages: u64,
+    ) !Self {
+        const page_size: u64 = @as(u64, 1) << page_size_log;
         const all_pages = try gpa.alignedAlloc(
-            Page,
+            u8,
             Item.Alignment,
-            num_pages,
+            page_size * num_pages,
         );
         const pages_to_slab = try gpa.alloc(std.atomic.Value(u32), num_pages);
 
@@ -38,10 +42,12 @@ pub const GlobalPager = struct {
             x.* = .init(MaxSlab);
         }
 
-        return Self{
+        return .{
             .priv = .{
                 .io = io,
                 .gpa = gpa,
+                .page_size = page_size,
+                .page_size_shift = page_size_log,
                 .all_pages = all_pages,
                 .num_empty_pages = .init(num_pages),
                 .mut = .init,
@@ -55,7 +61,7 @@ pub const GlobalPager = struct {
         self.priv.gpa.free(self.priv.pages_to_slab);
     }
 
-    pub fn allocPage(self: *Self, slab: types.SlabClass) ?*Page {
+    pub fn allocPage(self: *Self, slab: types.SlabClass) ?Page {
         const this = &self.priv;
 
         var num_empty = this.num_empty_pages.load(.seq_cst);
@@ -73,81 +79,62 @@ pub const GlobalPager = struct {
             return null;
         }
 
+        const num_pages = this.pages_to_slab.len;
+        const index = num_pages - num_empty;
         this.num_empty_pages.store(num_empty - 1, .seq_cst);
 
-        const index = this.all_pages.len - num_empty;
         const page_num = PageNum{ .page_num = index };
         self.updatePageSlab(page_num, slab);
 
-        return &this.all_pages[index];
+        const offset_start = index << self.priv.page_size_shift;
+        const offset_end = offset_start + self.priv.page_size;
+        return this.all_pages[offset_start..offset_end];
     }
 
-    pub fn getPageNumOfItem(self: Self, item: *Item) PageNum {
+    pub fn getPageNumOfItem(self: *const Self, item: *Item) PageNum {
         const this = self.priv;
-        const base_addr: *u8 = @ptrCast(&this.all_pages[0]);
-        const item_addr: *u8 = @ptrCast(item);
-        const offset = item_addr - base_addr;
-
-        const page_num = offset >> PageSizeShift;
+        const item_addr: [*]u8 = @ptrCast(item);
+        const offset = item_addr - this.all_pages.ptr;
+        const page_num = offset >> self.priv.page_size_shift;
         return .{ .page_num = page_num };
     }
 
     pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: types.SlabClass) void {
         const this = &self.priv;
-        std.debug.assert(page_num.page_num < this.all_pages.len);
+        const num_pages = this.pages_to_slab.len;
+        std.debug.assert(page_num.page_num < num_pages);
         this.pages_to_slab[page_num.page_num].store(slab.slab, .seq_cst);
     }
 
-    pub fn getSlabClass(self: Self, page_num: PageNum) types.SlabClass {
+    pub fn getSlabClass(self: *const Self, page_num: PageNum) types.SlabClass {
         return .{
             .slab = self.priv.pages_to_slab[page_num.page_num].load(.seq_cst),
         };
     }
-};
 
-const ItemIterator = struct {
-    item_size: u64,
-    page_addr: [*]u8,
-    current: u64,
-    max_offset: u64,
+    pub fn iterateItemsOfPage(
+        self: *const Self,
+        page: Page,
+        item_size: u64,
+        ctx: anytype,
+        yield: fn (ctx: @TypeOf(ctx), item: *Item) bool,
+    ) void {
+        std.debug.assertAligned(page, Item.Alignment);
+        std.debug.assert(Item.Alignment.check(item_size));
 
-    const Self = @This();
+        const num_items = self.priv.page_size / item_size;
+        var current_addr = page.ptr;
 
-    pub fn next(self: *Self) ?*Item {
-        if (self.current >= self.max_offset) {
-            return null;
+        for (0..num_items) |_| {
+            const item: *Item = @ptrCast(@alignCast(current_addr));
+            const ok = yield(ctx, item);
+            if (!ok) {
+                break;
+            }
+            current_addr = current_addr + item_size;
         }
-
-        const item_addr = self.page_addr + (self.current * self.item_size);
-        self.current = self.current + 1;
-
-        const item: *Item = @ptrCast(@alignCast(item_addr));
-        return item;
     }
 };
-
-pub fn iterateItemsOfPage(
-    page: *Page,
-    item_size: u64,
-    ctx: anytype,
-    yield: fn (ctx: @TypeOf(ctx), item: *Item) bool,
-) void {
-    std.debug.assertAligned(page, Item.Alignment);
-    std.debug.assert(Item.Alignment.check(item_size));
-
-    const base_addr: [*]u8 = @ptrCast(page);
-    const num_items = PageSize / item_size;
-    var current_addr = base_addr;
-
-    for (0..num_items) |_| {
-        const item: *Item = @ptrCast(@alignCast(current_addr));
-        const ok = yield(ctx, item);
-        if (!ok) {
-            break;
-        }
-        current_addr = current_addr + item_size;
-    }
-}
 
 // ===========================================================================
 // Testing
@@ -155,37 +142,36 @@ pub fn iterateItemsOfPage(
 
 const expectEqual = std.testing.expectEqual;
 
-test "page size" {
-    try expectEqual(1024 * 1024, @sizeOf(Page));
+test "max slab" {
     try std.testing.expect(MaxSlab > 1_000_000);
-    try expectEqual(1, @alignOf(Page));
 }
 
 test "basic" {
     var g = try GlobalPager.init(
         std.testing.io,
         std.testing.allocator,
+        20,
         3,
     );
     defer g.deinit();
 
-    try expectEqual(3, g.priv.all_pages.len);
+    try expectEqual(3 * 1024 * 1024, g.priv.all_pages.len);
     try expectEqual(3, g.priv.pages_to_slab.len);
     try expectEqual(0xffff_ffff, g.priv.pages_to_slab[0].load(.seq_cst));
     try expectEqual(0xffff_ffff, g.priv.pages_to_slab[2].load(.seq_cst));
 
     // test allocate pages
-    const p1 = g.allocPage(.{ .slab = 11 });
-    try expectEqual(&g.priv.all_pages[0], p1);
+    const p1 = g.allocPage(.{ .slab = 11 }).?;
+    try expectEqual(g.priv.all_pages.ptr, p1.ptr);
     try expectEqual(3, g.priv.pages_to_slab.len);
 
-    const p2 = g.allocPage(.{ .slab = 12 });
-    try expectEqual(&g.priv.all_pages[1], p2);
+    const p2 = g.allocPage(.{ .slab = 12 }).?;
+    try expectEqual(g.priv.all_pages.ptr + g.priv.page_size, p2.ptr);
     try expectEqual(11, g.priv.pages_to_slab[0].load(.seq_cst));
     try expectEqual(12, g.priv.pages_to_slab[1].load(.seq_cst));
 
-    const p3 = g.allocPage(.{ .slab = 13 });
-    try expectEqual(&g.priv.all_pages[2], p3);
+    const p3 = g.allocPage(.{ .slab = 13 }).?;
+    try expectEqual(g.priv.all_pages.ptr + 2 * g.priv.page_size, p3.ptr);
 
     const p4 = g.allocPage(.{ .slab = 14 });
     try expectEqual(null, p4);
@@ -205,9 +191,6 @@ test "basic" {
     const item3: *Item = @ptrCast(@alignCast(p3));
     try expectEqual(2, g.getPageNumOfItem(item3).page_num);
 
-    // test iterate
-    const page1 = p1.?;
-
     // iterate items of page
     const IterateCtx = struct {
         counter: u64,
@@ -221,8 +204,8 @@ test "basic" {
     };
     var ctx = IterateCtx{
         .counter = 0,
-        .base_addr = page1,
+        .base_addr = p1.ptr,
     };
-    iterateItemsOfPage(page1, 3 * 1024, &ctx, IterateCtx.yield);
+    g.iterateItemsOfPage(p1, 3 * 1024, &ctx, IterateCtx.yield);
     try expectEqual(341, ctx.counter); // check total
 }

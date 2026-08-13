@@ -175,7 +175,7 @@ pub fn ItemService(
                 .self = self,
                 .slab = slab,
             };
-            zpage.iterateItemsOfPage(
+            self._pager.iterateItemsOfPage(
                 page,
                 item_size,
                 &ctx,
@@ -240,7 +240,7 @@ const ServiceTest = struct {
             512,
             1.5,
         );
-        s.pager = try zpage.GlobalPager.init(io, gpa, 3);
+        s.pager = try zpage.GlobalPager.init(io, gpa, 20,3);
         s.locker = zlock.FakeItemLocks.init(gpa);
         s.lru_svc = zlru.FakeLruService.init(gpa);
 

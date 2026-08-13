@@ -242,9 +242,7 @@ test "lru list" {
 
 fn expectItemValue(value: u64, item: ?*Item) !void {
     try std.testing.expect(item != null);
-    if (item) |x| {
-        try expectEqual(value, x.cas_num.cas);
-    }
+    try expectEqual(value, item.?.cas_num.cas);
 }
 
 test "free list" {

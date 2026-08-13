@@ -17,9 +17,9 @@ pub const ItemFlags = packed struct {
 };
 
 pub const RefCount = struct {
-    refcount: u32 ,
+    refcount: u32,
     pub fn init(x: u32) @This() {
-        return .{.refcount = x};
+        return .{ .refcount = x };
     }
 };
 
@@ -59,7 +59,7 @@ pub const Item = struct {
             },
             .item_flags = ItemFlags{
                 .is_deleting = false,
-                .set_partial =  false,
+                .set_partial = false,
             },
             .is_touched = .init(false),
             .hash_next = null,

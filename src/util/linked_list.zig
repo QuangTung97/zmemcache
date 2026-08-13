@@ -118,12 +118,10 @@ const TestEntry = struct {
 
 const expectEqual = std.testing.expectEqual;
 
-fn expectEntryValue(null_node: ?*ListHead, value: u64) !void {
-    try std.testing.expect(null_node != null);
-    if (null_node) |n| {
-        const entry = TestEntry.fromList(n);
-        try expectEqual(value, entry.value);
-    }
+fn expectEntryValue(node: ?*ListHead, value: u64) !void {
+    try std.testing.expect(node != null);
+    const entry = TestEntry.fromList(node.?);
+    try expectEqual(value, entry.value);
 }
 
 fn expectIterValues(expected: []const u64, iter: anytype) !void {
@@ -235,7 +233,7 @@ test "pop back" {
 
     try expectEntryValue(head.popBack(), 23);
 
-    try expectListValues(&.{ 21, 22}, &head);
+    try expectListValues(&.{ 21, 22 }, &head);
 
     try expectEntryValue(head.popBack(), 22);
     try expectEntryValue(head.popBack(), 21);

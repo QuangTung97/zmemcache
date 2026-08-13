@@ -240,7 +240,7 @@ const ServiceTest = struct {
             512,
             1.5,
         );
-        s.pager = try zpage.GlobalPager.init(io, gpa, 20,3);
+        s.pager = try zpage.GlobalPager.init(io, gpa, 20, 3);
         s.locker = zlock.FakeItemLocks.init(gpa);
         s.lru_svc = zlru.FakeLruService.init(gpa);
 
@@ -279,21 +279,20 @@ test "basic" {
     svc.hash_func.addKeyHash(key01, hash1);
 
     // put1
-    const setter1 = svc.svc.put(key01, 46);
-    try std.testing.expect(setter1 != null);
-    if (setter1) |s| {
-        try expectEqual(hash1, s.hash);
-        try expectEqual(SlabClass.init(1), s.slab);
-        try expectEqual(144, svc.slab_conf.getSlabSize(s.slab));
+    const s1 = svc.svc.put(key01, 46).?;
 
-        // check item key
-        try expectEqual(Item.Size + key01.len + 46, s.item.getItemSize());
-        try std.testing.expectEqualStrings(key01, s.item.getKey());
+    // check basic setter info
+    try expectEqual(hash1, s1.hash);
+    try expectEqual(SlabClass.init(1), s1.slab);
+    try expectEqual(144, svc.slab_conf.getSlabSize(s1.slab));
 
-        // check flags
-        try expectEqual(true, s.item.slab_flags.is_present);
-        try expectEqual(false, s.item.item_flags.is_deleting);
-        try expectEqual(true, s.item.item_flags.set_partial);
-        try expectEqual(1, s.item.refcount.refcount);
-    }
+    // check item key
+    try expectEqual(Item.Size + key01.len + 46, s1.item.getItemSize());
+    try std.testing.expectEqualStrings(key01, s1.item.getKey());
+
+    // check flags
+    try expectEqual(true, s1.item.slab_flags.is_present);
+    try expectEqual(false, s1.item.item_flags.is_deleting);
+    try expectEqual(true, s1.item.item_flags.set_partial);
+    try expectEqual(1, s1.item.refcount.refcount);
 }

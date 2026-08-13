@@ -3,7 +3,9 @@ const types = @import("types.zig");
 
 const Item = types.Item;
 
-pub const Page = []u8;
+const ItemAlignBytes = Item.Alignment.toByteUnits();
+
+pub const Page = []align(ItemAlignBytes) u8;
 
 pub const PageNum = struct {
     page_num: u64,
@@ -22,7 +24,7 @@ pub const GlobalPager = struct {
         page_size: u64,
         page_size_shift: u6,
 
-        all_pages: []u8,
+        all_pages: []align(ItemAlignBytes) u8,
         num_empty_pages: std.atomic.Value(u64),
         mut: std.Io.Mutex,
         pages_to_slab: []std.atomic.Value(u32),
@@ -42,6 +44,8 @@ pub const GlobalPager = struct {
             Item.Alignment,
             page_size * num_pages,
         );
+        std.debug.assertAligned(all_pages, Item.Alignment);
+
         const pages_to_slab = try gpa.alloc(std.atomic.Value(u32), num_pages);
 
         for (pages_to_slab) |*x| {
@@ -94,7 +98,7 @@ pub const GlobalPager = struct {
 
         const offset_start = index << self.priv.page_size_shift;
         const offset_end = offset_start + self.priv.page_size;
-        return this.all_pages[offset_start..offset_end];
+        return @alignCast(this.all_pages[offset_start..offset_end]);
     }
 
     pub fn getPageNumOfItem(self: *const Self, item: *Item) PageNum {
@@ -129,7 +133,7 @@ pub const GlobalPager = struct {
         std.debug.assert(Item.Alignment.check(item_size));
 
         const num_items = self.priv.page_size / item_size;
-        var current_addr = page.ptr;
+        var current_addr: [*]align(ItemAlignBytes) u8 = page.ptr;
 
         for (0..num_items) |_| {
             const item: *Item = @ptrCast(@alignCast(current_addr));
@@ -137,7 +141,7 @@ pub const GlobalPager = struct {
             if (!ok) {
                 break;
             }
-            current_addr = current_addr + item_size;
+            current_addr = @alignCast(current_addr + item_size);
         }
     }
 };

@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const zutil = @import("zutil");
 
 const Item = types.Item;
 
@@ -109,6 +110,12 @@ pub const GlobalPager = struct {
         return .{ .page_num = page_num };
     }
 
+    pub fn getPageNumOfPage(self: *const Self, page: Page) PageNum {
+        const offset = page.ptr - self.priv.all_pages.ptr;
+        const page_num = offset >> self.priv.page_size_shift;
+        return .{ .page_num = page_num };
+    }
+
     pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: types.SlabClass) void {
         const this = &self.priv;
         const num_pages = this.pages_to_slab.len;
@@ -147,6 +154,27 @@ pub const GlobalPager = struct {
 
     pub fn getBaseAddr(self: *const Self) [*]u8 {
         return self.priv.all_pages.ptr;
+    }
+
+    const Iterator = struct {
+        _index: usize,
+        _pager: *const Self,
+
+        pub fn next(self: *@This()) ?PageNum {
+            if (self._index >= self._pager.priv.pages_to_slab.len) {
+                return null;
+            }
+            const result = PageNum.init(self._index);
+            self._index += 1;
+            return result;
+        }
+    };
+
+    pub fn getAllPages(self: *const Self) Iterator {
+        return .{
+            ._index = 0,
+            ._pager = self,
+        };
     }
 };
 
@@ -189,6 +217,13 @@ test "basic" {
 
     const p4 = g.allocPage(.{ .slab = 14 });
     try expectEqual(null, p4);
+
+    // check get all pages
+    try zutil.expectIteratorValues(PageNum, &.{
+        PageNum.init(0),
+        PageNum.init(1),
+        PageNum.init(2),
+    }, g.getAllPages());
 
     // test get page num
     const item1: *Item = @ptrCast(@alignCast(p1));

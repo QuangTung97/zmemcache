@@ -185,6 +185,7 @@ pub fn ItemService(
             const page = if (null_page) |p| p else {
                 return;
             };
+            const page_num = self._pager.getPageNumOfPage(page);
 
             const IterateCtx = struct {
                 self: *Self,
@@ -205,7 +206,8 @@ pub fn ItemService(
                 IterateCtx.yield,
             );
 
-            // TODO add page to the slab
+            // page number to slab
+            LruFuncs.pushPage(self._lru, slab.slab_class, page_num);
         }
 
         fn evictFromLru(self: *Self, slab: SlabClass, current_slot: LockSlot) void {
@@ -361,11 +363,14 @@ const ServiceTest = struct {
     }
 
     fn put(self: *Self, key: String, value_len: usize) ?ItemSetter {
-        return self.svc.put(key, value_len);
+        const result = self.svc.put(key, value_len);
+        self.checkInvariant();
+        return result;
     }
 
     fn finishPut(self: *Self, setter: ItemSetter) void {
         self.svc.finishPut(setter);
+        self.checkInvariant();
     }
 
     fn putAndFinish(self: *Self, key: String, value_len: usize) void {
@@ -373,10 +378,39 @@ const ServiceTest = struct {
         self.finishPut(setter);
     }
 
-    // TODO
-    // fn checkInvariant(self: *Self) void {
-    //     self.slab_conf._all_classes.items
-    // }
+    fn checkInvariant(self: *Self) void {
+        const gpa = std.testing.allocator;
+        var slab_page_map = std.AutoHashMap(SlabClass, PageNum).init(gpa);
+        defer slab_page_map.deinit();
+
+        var slab_iter = self.slab_conf.getAllSlabClasses();
+        while (slab_iter.next()) |slab| {
+            const null_page_list = self.lru_svc.page_queue_map.get(slab.slab_class);
+            const page_list = if (null_page_list) |h| h else {
+                continue;
+            };
+
+            var it = page_list.iterator();
+            while (it.next()) |page_num| {
+                slab_page_map.put(slab.slab_class, page_num) catch unreachable;
+                self.checkSlabPageInvariant(slab, page_num);
+            }
+        }
+
+        var page_iter = self.pager.getAllPages();
+        while (page_iter.next()) |page_num| {
+            const slab = self.pager.getSlabClass(page_num);
+            if (slab.slab == zpage.MaxSlab) {
+                std.debug.assert(!slab_page_map.contains(slab));
+            } else {
+                std.debug.assert(slab_page_map.get(slab).?.page_num == page_num.page_num);
+            }
+        }
+    }
+
+    fn checkSlabPageInvariant(_: *Self, _: SlabSize, _: PageNum) void {
+        // TODO
+    }
 
     // TODO
     // fn expectPageItemKeys(

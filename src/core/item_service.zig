@@ -207,7 +207,7 @@ pub fn ItemService(
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
-            found.item.refcount.refcount -= 1;
+            self.decreaseRefcountAndDelete(found.item);
         }
 
         pub fn delete(self: *Self, key: String) void {
@@ -224,7 +224,8 @@ pub fn ItemService(
             const it = if (null_item) |p| p else {
                 return;
             };
-            self.doDeleteItem(it.slab, it, pitem);
+
+            self.doDeleteItem(it, pitem);
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
@@ -317,7 +318,7 @@ pub fn ItemService(
 
             // do not lock if lock slot the same
             if (current_slot.lock_slot == new_slot.lock_slot) {
-                return self.findInBucketAndDeleteItem(slab, new_hash, evicted_item);
+                return self.findInBucketAndDeleteItem(new_hash, evicted_item);
             }
 
             // try to lock the evicted item
@@ -327,10 +328,10 @@ pub fn ItemService(
             }
             defer ItemLocks.unlock(self._locker, new_slot);
 
-            return self.findInBucketAndDeleteItem(slab, new_hash, evicted_item);
+            return self.findInBucketAndDeleteItem(new_hash, evicted_item);
         }
 
-        fn findInBucketAndDeleteItem(self: *Self, slab: SlabClass, hash: HashValue, deleted_item: *Item) bool {
+        fn findInBucketAndDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item) bool {
             self.assertItemLocked(hash);
 
             const pitem = self.findItemPointerInBucket(hash, deleted_item);
@@ -339,13 +340,43 @@ pub fn ItemService(
                 return false;
             }
 
-            self.doDeleteItem(slab, deleted_item, pitem);
+            self.doDeleteItem(deleted_item, pitem);
             return true;
         }
 
-        fn doDeleteItem(self: *Self, slab: SlabClass, deleted_item: *Item, pitem: *NullItem) void {
+        fn doDeleteItem(self: *Self, deleted_item: *Item, pitem: *NullItem) void {
             const next = deleted_item.hash_next;
             pitem.* = next;
+
+            self.decreaseRefcountAndDelete(deleted_item);
+        }
+
+        fn decreaseRefcountAndDelete(self: *Self, deleted_item: *Item) void {
+            deleted_item.refcount.refcount -= 1;
+            deleted_item.item_flags.is_deleting = true;
+
+            if (deleted_item.refcount.refcount > 0) {
+                return;
+            }
+
+            const slab = deleted_item.slab;
+            if (LruFuncs.isSlabLocked(self._lru, slab)) {
+                self.doMoveItemFromLruToFree(deleted_item);
+            } else {
+                // lock then delete
+                LruFuncs.lockSlab(self._lru, slab);
+                defer LruFuncs.unlockSlab(self._lru, slab);
+
+                self.doMoveItemFromLruToFree(deleted_item);
+            }
+        }
+
+        fn doMoveItemFromLruToFree(self: *Self, deleted_item: *Item) void {
+            const slab = deleted_item.slab;
+            self.assertSlabLocked(slab);
+
+            // clear present flag
+            deleted_item.slab_flags.is_present = false;
 
             LruFuncs.deleteItem(self._lru, slab, deleted_item);
             LruFuncs.putFreeItem(self._lru, slab, deleted_item);
@@ -527,7 +558,8 @@ const ServiceTest = struct {
     }
 
     fn delete(self: *Self, key: String) void {
-        return self.svc.delete(key);
+        self.svc.delete(key);
+        self.checkInvariant();
     }
 
     fn checkInvariant(self: *Self) void {
@@ -749,7 +781,7 @@ test "with eviction" {
         key02, key03, key04,
     });
 
-    try s.expectItemKeysInBucket(hash1, &.{} );
+    try s.expectItemKeysInBucket(hash1, &.{});
     try s.expectItemKeysInBucket(hash2, &.{key02});
     try s.expectItemKeysInBucket(hash3, &.{key03});
     try s.expectItemKeysInBucket(hash4, &.{key04});
@@ -834,4 +866,37 @@ test "put => delete" {
     try s.expectItemKeysInBucket(hash1, &.{key02});
     try s.expectItemKeysInBucket(hash2, &.{});
     try s.expectItemKeysInBucket(hash3, &.{key03});
+}
+
+test "put => get => delete => finish get" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, 46);
+    const getter1 = s.get(key01);
+
+    s.delete(key01);
+
+    // check item
+    const it = getter1.Found.item;
+    try expectEqual(1, it.refcount.refcount);
+    try expectEqual(true, it.slab_flags.is_present);
+    try expectEqual(true, it.item_flags.is_deleting);
+    try expectEqual(false, it.item_flags.set_partial);
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{key01});
+
+    s.finishGet(getter1.Found); // finish get
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{});
+
+    // check item
+    try expectEqual(0, it.refcount.refcount);
+    try expectEqual(false, it.slab_flags.is_present);
+    try expectEqual(true, it.item_flags.is_deleting);
+    try expectEqual(false, it.item_flags.set_partial);
 }

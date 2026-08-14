@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const String = []const u8;
 
 pub fn expectIteratorValues(T: type, expected: []const T, iter: anytype) !void {
     const gpa = std.testing.allocator;
@@ -14,6 +15,13 @@ pub fn expectIteratorValues(T: type, expected: []const T, iter: anytype) !void {
     }
 
     try std.testing.expectEqualSlices(T, expected, values.items);
+}
+
+pub fn expectStringSlicesEqual(expected: []const String, actual: []const String) !void {
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (actual, 0..) |s, index| {
+        try std.testing.expectEqualStrings(expected[index], s);
+    }
 }
 
 test "expect iterator values" {

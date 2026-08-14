@@ -177,7 +177,7 @@ pub const FakeHashFunc = struct {
         @panic("not found key");
     }
 
-    pub fn addKeyHash(self: *Self, key: []const u8, value: HashValue) void {
+    pub fn putKeyHash(self: *Self, key: []const u8, value: HashValue) void {
         self.key_map.put(key, value) catch unreachable;
     }
 };
@@ -239,7 +239,7 @@ test "fake hash func" {
     const hash1 = HashValue.init(41);
     const key01 = "key01";
 
-    fake.addKeyHash(key01, hash1);
+    fake.putKeyHash(key01, hash1);
 
     try expectEqual(hash1, s.hashKey(&fake, key01));
 }

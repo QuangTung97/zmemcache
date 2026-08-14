@@ -4,6 +4,7 @@ const zslab = @import("slab_class.zig");
 const zlock = @import("item_lock.zig");
 const zlru = @import("lru_service.zig");
 const zpage = @import("page.zig");
+const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
@@ -284,33 +285,50 @@ pub fn ItemService(
             );
         }
 
-        fn tryToEvictItem(self: *Self, evicted_item: *Item, slab: SlabClass, _: LockSlot) bool {
+        fn tryToEvictItem(self: *Self, evicted_item: *Item, slab: SlabClass, current_slot: LockSlot) bool {
             self.assertSlabLocked(slab);
 
             const new_hash = HashFunc.hashKey(self._hasher, evicted_item.getKey());
             const new_slot = ItemLocks.getSlot(self._locker, new_hash);
 
-            // TODO do not lock if lock slot the same
+            // do not lock if lock slot the same
+            if (current_slot.lock_slot == new_slot.lock_slot) {
+                self.doDeleteItem(slab, new_hash, evicted_item);
+                return true;
+            }
 
             // try to lock the evicted item
-            ItemLocks.lock(self._locker, new_slot);
+            const locked = ItemLocks.tryLock(self._locker, new_slot);
+            if (!locked) {
+                return false;
+            }
             defer ItemLocks.unlock(self._locker, new_slot);
 
-            LruFuncs.deleteItem(self._lru, slab, evicted_item);
-            LruFuncs.putFreeItem(self._lru, slab, evicted_item);
+            self.doDeleteItem(slab, new_hash, evicted_item);
+            return true;
+        }
+
+        fn doDeleteItem(self: *Self, slab: SlabClass, hash: HashValue, deleted_item: *Item) void {
+            self.assertItemLocked(hash);
+
+            LruFuncs.deleteItem(self._lru, slab, deleted_item);
+            LruFuncs.putFreeItem(self._lru, slab, deleted_item);
 
             // remove from bucket list
-            var pitem = self._table.getBucket(new_hash);
+            var pitem = self._table.getBucket(hash);
             while (pitem.*) |it| {
-                if (it == evicted_item) {
+                if (it == deleted_item) {
                     const next = it.hash_next;
                     pitem.* = next;
                     break;
                 }
                 pitem = &it.hash_next;
             }
+        }
 
-            return true;
+        fn assertItemLocked(self: *Self, hash: HashValue) void {
+            const slot = ItemLocks.getSlot(self._locker, hash);
+            std.debug.assert(ItemLocks.isLocked(self._locker, slot));
         }
 
         fn assertSlabLocked(self: *Self, slab: SlabClass) void {
@@ -405,10 +423,10 @@ const ServiceTest = struct {
         );
 
         // setup hash values
-        s.hash_func.addKeyHash(key01, hash1);
-        s.hash_func.addKeyHash(key02, hash2);
-        s.hash_func.addKeyHash(key03, hash3);
-        s.hash_func.addKeyHash(key04, hash4);
+        s.hash_func.putKeyHash(key01, hash1);
+        s.hash_func.putKeyHash(key02, hash2);
+        s.hash_func.putKeyHash(key03, hash3);
+        s.hash_func.putKeyHash(key04, hash4);
 
         return s;
     }
@@ -494,27 +512,38 @@ const ServiceTest = struct {
         self.pager.iterateItemsOfPage(page, slab.item_size, &ctx, IterateCtx.yield);
     }
 
-    fn expectKeyExists(self: *Self, key: String) !void {
-        const getter = self.svc.get(key);
-        try expectEqual(ItemGetter.Found, std.meta.activeTag(getter));
-        const it = getter.Found.item;
-        try std.testing.expectEqualStrings(key, it.getKey());
+    fn expectItemKeysInSlab(self: *Self, slab: SlabClass, expected_keys: []const String) !void {
+        const gpa = std.testing.allocator;
+
+        var ctx = struct {
+            all_keys: std.ArrayList(String),
+            pub fn yield(ctx: *@This(), item: *Item) bool {
+                ctx.all_keys.append(gpa, item.getKey()) catch unreachable;
+                return true;
+            }
+        }{
+            .all_keys = .empty,
+        };
+        defer ctx.all_keys.deinit(gpa);
+
+        self.lru_svc.iterateItems(
+            slab,
+            ItemIter.init(&ctx),
+        );
+
+        try zutil.expectStringSlicesEqual(expected_keys, ctx.all_keys.items);
     }
 
-    fn expectKeyNotExist(self: *Self, key: String) !void {
-        const getter = self.svc.get(key);
-        try expectEqual(ItemGetter.NotFound, std.meta.activeTag(getter));
-    }
-
-    fn expectNumItemsInBucket(self: *Self, num_items: usize, hash: HashValue) !void {
+    fn expectItemKeysInBucket(self: *Self, expected_keys: []const String, hash: HashValue) !void {
         const bucket_next = self.svc._table.getBucket(hash);
         var next_item = bucket_next.*;
         var count: usize = 0;
         while (next_item) |it| {
             next_item = it.hash_next;
+            try std.testing.expectEqualStrings(expected_keys[count], it.getKey());
             count += 1;
         }
-        try expectEqual(num_items, count);
+        try expectEqual(expected_keys.len, count);
     }
 
     fn expectTouchList(self: *Self, expected: []const TouchItem) !void {
@@ -574,7 +603,7 @@ test "put then finish" {
     }, s.locker.actions.items);
 }
 
-test "put => get => get finish" {
+test "put => get => finish get" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
@@ -626,29 +655,79 @@ test "with eviction" {
     // check actions
     try std.testing.expectEqualSlices(zlock.LockAction, &.{
         .{ .action = .Lock, .hash = hash4.hash },
-        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .TryLock, .hash = hash1.hash },
         .{ .action = .Unlock, .hash = hash1.hash },
         .{ .action = .Unlock, .hash = hash4.hash },
     }, s.locker.actions.items);
 
     s.finishPut(setter4);
 
-    try s.expectKeyNotExist(key01);
-    try s.expectKeyExists(key02);
-    try s.expectKeyExists(key03);
-    try s.expectKeyExists(key04);
-
-    // check touch list
-    try s.expectTouchList(&.{
-        TouchItem.init(SlabClass.init(1), key02),
-        TouchItem.init(SlabClass.init(1), key03),
-        TouchItem.init(SlabClass.init(1), key04),
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{
+        key02, key03, key04,
     });
 
-    try s.expectNumItemsInBucket(0, hash1);
-    try s.expectNumItemsInBucket(1, hash2);
-    try s.expectNumItemsInBucket(1, hash3);
-    try s.expectNumItemsInBucket(1, hash4);
+    try s.expectItemKeysInBucket(&.{}, hash1);
+    try s.expectItemKeysInBucket(&.{key02}, hash2);
+    try s.expectItemKeysInBucket(&.{key03}, hash3);
+    try s.expectItemKeysInBucket(&.{key04}, hash4);
+}
 
-    // TODO handle case same slot
+test "with eviction same hash" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, 46);
+    s.putAndFinish(key02, 46);
+    s.putAndFinish(key03, 46);
+
+    s.hash_func.putKeyHash(key04, hash1);
+
+    // clear lock actions
+    s.locker.actions.clearRetainingCapacity();
+
+    const setter4 = s.put(key04, 46).?;
+
+    // check actions
+    try std.testing.expectEqualSlices(zlock.LockAction, &.{
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash1.hash },
+    }, s.locker.actions.items);
+
+    s.finishPut(setter4);
+
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{
+        key02, key03, key04,
+    });
+}
+
+test "with eviction, key01 is locking" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, 46);
+    s.putAndFinish(key02, 46);
+    s.putAndFinish(key03, 46);
+
+    // clear lock actions
+    s.locker.actions.clearRetainingCapacity();
+
+    // key01 is locking
+    s.locker.lock(s.locker.getSlot(hash1));
+
+    const setter4 = s.put(key04, 46).?;
+
+    // check actions
+    try std.testing.expectEqualSlices(zlock.LockAction, &.{
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Lock, .hash = hash4.hash },
+        .{ .action = .TryLock, .hash = hash2.hash },
+        .{ .action = .Unlock, .hash = hash2.hash },
+        .{ .action = .Unlock, .hash = hash4.hash },
+    }, s.locker.actions.items);
+
+    s.finishPut(setter4);
+
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{
+        key01, key03, key04,
+    });
 }

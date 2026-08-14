@@ -14,6 +14,9 @@ const CasNum = types.CasNum;
 const LockSlot = types.LockSlot;
 const SlabClassConfig = zslab.SlabClassConfig;
 const ItemIter = zlru.ItemIter;
+const PageNum = zpage.PageNum;
+
+const String = []const u8;
 
 // TODO validate hash table must bigger than item locks table
 
@@ -96,7 +99,7 @@ pub fn ItemService(
             self._table.deinit();
         }
 
-        pub fn put(self: *Self, key: []const u8, value_len: usize) ?ItemSetter {
+        pub fn put(self: *Self, key: String, value_len: usize) ?ItemSetter {
             // compute hash value & lock slot
             const hash_value = HashFunc.hashKey(self._hasher, key);
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
@@ -149,7 +152,7 @@ pub fn ItemService(
             setter.item.refcount.refcount -= 1;
         }
 
-        pub fn get(_: *Self, _: []const u8) ItemGetter {
+        pub fn get(_: *Self, _: String) ItemGetter {
             return .{
                 .NotFound = .{},
             };
@@ -243,7 +246,6 @@ pub fn ItemService(
 
             ItemLocks.lock(self._locker, new_slot);
             defer ItemLocks.unlock(self._locker, new_slot);
-
 
             LruFuncs.deleteItem(self._lru, slab, item);
             LruFuncs.putFreeItem(self._lru, slab, item);
@@ -357,6 +359,33 @@ const ServiceTest = struct {
         self.hash_func.deinit();
         self.gpa.destroy(self);
     }
+
+    fn put(self: *Self, key: String, value_len: usize) ?ItemSetter {
+        return self.svc.put(key, value_len);
+    }
+
+    fn finishPut(self: *Self, setter: ItemSetter) void {
+        self.svc.finishPut(setter);
+    }
+
+    fn putAndFinish(self: *Self, key: String, value_len: usize) void {
+        const setter = self.put(key, value_len).?;
+        self.finishPut(setter);
+    }
+
+    // TODO
+    // fn checkInvariant(self: *Self) void {
+    //     self.slab_conf._all_classes.items
+    // }
+
+    // TODO
+    // fn expectPageItemKeys(
+    //     self: *Self,
+    //     page: PageNum, slab: SlabClass,
+    //     keys: []const String,
+    // ) !void {
+    //     self.pager.iterateItemsOfPage(page);
+    // }
 };
 
 test "put then finish" {
@@ -364,7 +393,7 @@ test "put then finish" {
     defer s.deinit();
 
     // put
-    const setter = s.svc.put(key01, 46).?;
+    const setter = s.put(key01, 46).?;
 
     // check basic setter info
     try expectEqual(hash1, setter.hash);
@@ -388,7 +417,7 @@ test "put then finish" {
     try expectEqual(46, setter.item.getValue().len);
     @memset(setter.item.getValue(), 'A');
 
-    s.svc.finishPut(setter);
+    s.finishPut(setter);
 
     // check flags
     try expectEqual(true, setter.item.slab_flags.is_present);
@@ -409,19 +438,14 @@ test "with eviction" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    const setter1 = s.svc.put(key01, 46).?;
-    s.svc.finishPut(setter1);
-
-    const setter2 = s.svc.put(key02, 46).?;
-    s.svc.finishPut(setter2);
-
-    const setter3 = s.svc.put(key03, 46).?;
-    s.svc.finishPut(setter3);
+    s.putAndFinish(key01, 46);
+    s.putAndFinish(key02, 46);
+    s.putAndFinish(key03, 46);
 
     // clear lock actions
     s.locker.actions.clearRetainingCapacity();
 
-    const setter4 = s.svc.put(key04, 46).?;
+    const setter4 = s.put(key04, 46).?;
 
     // check actions
     try std.testing.expectEqualSlices(zlock.LockAction, &.{
@@ -431,7 +455,7 @@ test "with eviction" {
         .{ .action = .Unlock, .hash = hash4.hash },
     }, s.locker.actions.items);
 
-    s.svc.finishPut(setter4);
+    s.finishPut(setter4);
 
     // TODO check remain items
     // TODO handle case same slot

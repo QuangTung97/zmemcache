@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
 const Item = types.Item;
@@ -14,6 +15,23 @@ pub const SlabSize = struct {
             .slab_class = SlabClass.init(slab),
             .item_size = size,
         };
+    }
+};
+
+pub const SlabSizeIter = struct {
+    _config: *const SlabClassConfig,
+    _current: SlabClass,
+    pub fn next(self: *@This()) ?SlabSize {
+        if (self._current.slab >= self._config._all_classes.items.len) {
+            return null;
+        }
+        const item_size = self._config._all_classes.items[self._current.slab];
+        const result = SlabSize{
+            .slab_class = self._current,
+            .item_size = item_size,
+        };
+        self._current.slab += 1;
+        return result;
     }
 };
 
@@ -61,13 +79,13 @@ pub const SlabClassConfig = struct {
         self._all_classes.deinit(self._gpa);
     }
 
-    pub fn getItemSlab(self: *Self, item_size: usize) SlabSize {
+    pub fn getItemSlab(self: *const Self, item_size: usize) SlabSize {
         const index = self.lowerBound(item_size);
         const slab: u32 = @intCast(index);
         return .init(slab, self._all_classes.items[index]);
     }
 
-    pub fn getSlabSize(self: *Self, slab: SlabClass) usize {
+    pub fn getSlabSize(self: *const Self, slab: SlabClass) usize {
         return self._all_classes.items[slab.slab];
     }
 
@@ -75,13 +93,20 @@ pub const SlabClassConfig = struct {
         return std.math.order(key, item);
     }
 
-    fn lowerBound(self: *Self, key: usize) usize {
+    fn lowerBound(self: *const Self, key: usize) usize {
         return std.sort.lowerBound(
             usize,
             self._all_classes.items,
             key,
             compareFunc,
         );
+    }
+
+    pub fn getAllSlabClasses(self: *const Self) SlabSizeIter {
+        return .{
+            ._config = self,
+            ._current = SlabClass.init(0),
+        };
     }
 };
 
@@ -114,6 +139,17 @@ test "normal" {
 
     try expectEqual(96, conf.getSlabSize(SlabClass.init(0)));
     try expectEqual(144, conf.getSlabSize(SlabClass.init(1)));
+
+    // get all sizes
+    try zutil.expectIteratorValues(SlabSize, &.{
+        SlabSize.init(0, 96),
+        SlabSize.init(1, 144),
+        SlabSize.init(2, 216),
+        SlabSize.init(3, 328),
+        SlabSize.init(4, 488),
+        SlabSize.init(5, 736),
+        SlabSize.init(6, 1024),
+    }, conf.getAllSlabClasses());
 }
 
 test "max size is included" {

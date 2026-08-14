@@ -59,11 +59,13 @@ pub const ItemSetter = struct {
     item: *Item,
 };
 
+pub const ItemFound = struct {
+    hash: HashValue,
+    item: *Item,
+};
+
 pub const ItemGetter = union(enum) {
-    Found: struct {
-        hash: HashValue,
-        item: *Item,
-    },
+    Found: ItemFound,
     NotFound: struct {},
 };
 
@@ -175,6 +177,7 @@ pub fn ItemService(
             const hash_value = HashFunc.hashKey(self._hasher, key);
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
+            // lock item
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
@@ -201,6 +204,16 @@ pub fn ItemService(
             return .{
                 .NotFound = .{},
             };
+        }
+
+        pub fn finishGet(self: *Self, found: ItemFound) void {
+            const lock_slot = ItemLocks.getSlot(self._locker, found.hash);
+
+            // lock item
+            ItemLocks.lock(self._locker, lock_slot);
+            defer ItemLocks.unlock(self._locker, lock_slot);
+
+            found.item.refcount.refcount -= 1;
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
@@ -462,6 +475,10 @@ const ServiceTest = struct {
         return self.svc.get(key);
     }
 
+    fn finishGet(self: *Self, found: ItemFound) void {
+        return self.svc.finishGet(found);
+    }
+
     fn checkInvariant(self: *Self) void {
         const gpa = std.testing.allocator;
 
@@ -630,13 +647,24 @@ test "put => get => finish get" {
         .{ .action = .Lock, .hash = hash1.hash },
         .{ .action = .Unlock, .hash = hash1.hash },
     }, s.locker.actions.items);
+    s.locker.actions.clearRetainingCapacity();
 
     // check touch list
     try s.expectTouchList(&.{
         TouchItem.init(SlabClass.init(1), key01),
     });
 
-    // TODO add finish get
+    s.finishGet(get1.Found);
+
+    // check actions
+    try std.testing.expectEqualSlices(zlock.LockAction, &.{
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash1.hash },
+    }, s.locker.actions.items);
+    s.locker.actions.clearRetainingCapacity();
+
+    // check refcount
+    try expectEqual(1, it1.refcount.refcount);
 }
 
 test "with eviction" {

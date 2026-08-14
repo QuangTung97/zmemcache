@@ -18,12 +18,13 @@ const ItemIter = zlru.ItemIter;
 const PageNum = zpage.PageNum;
 
 const String = []const u8;
+const NullItem = ?*Item;
 
 // TODO validate hash table must bigger than item locks table
 
 const HashTable = struct {
     gpa: std.mem.Allocator,
-    buckets: []?*Item,
+    buckets: []NullItem,
     mask: u64,
 
     const Self = @This();
@@ -32,7 +33,7 @@ const HashTable = struct {
         const table_size = @as(u64, 1) << hash_size_log;
 
         // init buckets
-        const buckets = try gpa.alloc(?*Item, table_size);
+        const buckets = try gpa.alloc(NullItem, table_size);
         for (buckets) |*next| {
             next.* = null;
         }
@@ -48,7 +49,7 @@ const HashTable = struct {
         self.gpa.free(self.buckets);
     }
 
-    fn getBucket(self: *Self, hash: HashValue) *?*Item {
+    fn getBucket(self: *Self, hash: HashValue) *NullItem {
         const index = hash.hash & self.mask;
         return &self.buckets[index];
     }
@@ -181,28 +182,21 @@ pub fn ItemService(
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
-            const bucket_next = self._table.getBucket(hash_value);
-            var item_next = bucket_next.*;
-            while (item_next) |it| {
-                if (!std.mem.eql(u8, it.getKey(), key)) {
-                    item_next = it.hash_next;
-                    continue;
-                }
+            const pitem = self.findItemPointerWithKey(hash_value, key);
+            const null_item = pitem.*;
+            const it = if (null_item) |p| p else {
+                return .{ .NotFound = .{} };
+            };
 
-                // increase refcount
-                it.refcount.refcount += 1;
-                LruFuncs.touchItem(self._lru, it.slab, it);
-
-                return .{
-                    .Found = .{
-                        .hash = hash_value,
-                        .item = it,
-                    },
-                };
-            }
+            // increase refcount
+            it.refcount.refcount += 1;
+            LruFuncs.touchItem(self._lru, it.slab, it);
 
             return .{
-                .NotFound = .{},
+                .Found = .{
+                    .hash = hash_value,
+                    .item = it,
+                },
             };
         }
 
@@ -224,6 +218,13 @@ pub fn ItemService(
             // lock item
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
+
+            const pitem = self.findItemPointerWithKey(hash_value, key);
+            const null_item = pitem.*;
+            const it = if (null_item) |p| p else {
+                return;
+            };
+            self.doDeleteItem(it.slab, it, pitem);
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
@@ -316,8 +317,7 @@ pub fn ItemService(
 
             // do not lock if lock slot the same
             if (current_slot.lock_slot == new_slot.lock_slot) {
-                self.doDeleteItem(slab, new_hash, evicted_item);
-                return true;
+                return self.findInBucketAndDeleteItem(slab, new_hash, evicted_item);
             }
 
             // try to lock the evicted item
@@ -327,26 +327,54 @@ pub fn ItemService(
             }
             defer ItemLocks.unlock(self._locker, new_slot);
 
-            self.doDeleteItem(slab, new_hash, evicted_item);
+            return self.findInBucketAndDeleteItem(slab, new_hash, evicted_item);
+        }
+
+        fn findInBucketAndDeleteItem(self: *Self, slab: SlabClass, hash: HashValue, deleted_item: *Item) bool {
+            self.assertItemLocked(hash);
+
+            const pitem = self.findItemPointerInBucket(hash, deleted_item);
+            const null_item = pitem.*;
+            if (null_item == null) {
+                return false;
+            }
+
+            self.doDeleteItem(slab, deleted_item, pitem);
             return true;
         }
 
-        fn doDeleteItem(self: *Self, slab: SlabClass, hash: HashValue, deleted_item: *Item) void {
-            self.assertItemLocked(hash);
+        fn doDeleteItem(self: *Self, slab: SlabClass, deleted_item: *Item, pitem: *NullItem) void {
+            const next = deleted_item.hash_next;
+            pitem.* = next;
 
             LruFuncs.deleteItem(self._lru, slab, deleted_item);
             LruFuncs.putFreeItem(self._lru, slab, deleted_item);
+        }
 
-            // remove from bucket list
+        fn findItemPointerInBucket(self: *Self, hash: HashValue, find_item: *Item) *NullItem {
+            self.assertItemLocked(hash);
+
             var pitem = self._table.getBucket(hash);
             while (pitem.*) |it| {
-                if (it == deleted_item) {
-                    const next = it.hash_next;
-                    pitem.* = next;
-                    break;
+                if (it == find_item) {
+                    return pitem;
                 }
                 pitem = &it.hash_next;
             }
+            return pitem;
+        }
+
+        fn findItemPointerWithKey(self: *Self, hash: HashValue, key: String) *NullItem {
+            self.assertItemLocked(hash);
+
+            var pitem = self._table.getBucket(hash);
+            while (pitem.*) |it| {
+                if (std.mem.eql(u8, it.getKey(), key)) {
+                    return pitem;
+                }
+                pitem = &it.hash_next;
+            }
+            return pitem;
         }
 
         fn assertItemLocked(self: *Self, hash: HashValue) void {
@@ -574,16 +602,20 @@ const ServiceTest = struct {
         try zutil.expectStringSlicesEqual(expected_keys, ctx.all_keys.items);
     }
 
-    fn expectItemKeysInBucket(self: *Self, expected_keys: []const String, hash: HashValue) !void {
+    fn expectItemKeysInBucket(self: *Self, hash: HashValue, expected_keys: []const String) !void {
+        const gpa = std.testing.allocator;
         const bucket_next = self.svc._table.getBucket(hash);
+
+        var actual_keys = std.ArrayList(String).empty;
+        defer actual_keys.deinit(gpa);
+
         var next_item = bucket_next.*;
-        var count: usize = 0;
         while (next_item) |it| {
+            try actual_keys.append(gpa, it.getKey());
             next_item = it.hash_next;
-            try std.testing.expectEqualStrings(expected_keys[count], it.getKey());
-            count += 1;
         }
-        try expectEqual(expected_keys.len, count);
+
+        try zutil.expectStringSlicesEqual(expected_keys, actual_keys.items);
     }
 
     fn expectTouchList(self: *Self, expected: []const TouchItem) !void {
@@ -717,10 +749,10 @@ test "with eviction" {
         key02, key03, key04,
     });
 
-    try s.expectItemKeysInBucket(&.{}, hash1);
-    try s.expectItemKeysInBucket(&.{key02}, hash2);
-    try s.expectItemKeysInBucket(&.{key03}, hash3);
-    try s.expectItemKeysInBucket(&.{key04}, hash4);
+    try s.expectItemKeysInBucket(hash1, &.{} );
+    try s.expectItemKeysInBucket(hash2, &.{key02});
+    try s.expectItemKeysInBucket(hash3, &.{key03});
+    try s.expectItemKeysInBucket(hash4, &.{key04});
 }
 
 test "with eviction same hash" {
@@ -783,8 +815,23 @@ test "with eviction, key01 is locking" {
     });
 }
 
-test "put => get => delete" {
+test "put => delete" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
+    s.hash_func.putKeyHash(key02, hash1); // same hash as key01
+
+    s.putAndFinish(key01, 46);
+    s.putAndFinish(key02, 46);
+    s.putAndFinish(key03, 46);
+    s.delete(key01);
+
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{
+        key02,
+        key03,
+    });
+
+    try s.expectItemKeysInBucket(hash1, &.{key02});
+    try s.expectItemKeysInBucket(hash2, &.{});
+    try s.expectItemKeysInBucket(hash3, &.{key03});
 }

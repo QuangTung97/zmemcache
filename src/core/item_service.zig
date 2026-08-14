@@ -47,9 +47,9 @@ const HashTable = struct {
         self.gpa.free(self.buckets);
     }
 
-    fn getBucket(self: *Self, hash: HashValue) ?*Item {
+    fn getBucket(self: *Self, hash: HashValue) *?*Item {
         const index = hash.hash & self.mask;
-        return self.buckets[index];
+        return &self.buckets[index];
     }
 };
 
@@ -148,6 +148,11 @@ pub fn ItemService(
             // put to lru list
             LruFuncs.putItem(self._lru, slab, it);
 
+            // add to bucket
+            const hash_next = self._table.getBucket(hash_value);
+            it.hash_next = hash_next.*;
+            hash_next.* = it;
+
             return .{
                 .hash = hash_value,
                 .item = it,
@@ -172,12 +177,16 @@ pub fn ItemService(
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
-            var item_next = self._table.getBucket(hash_value);
+            const bucket_next = self._table.getBucket(hash_value);
+            var item_next = bucket_next.*;
             while (item_next) |it| {
                 if (!std.mem.eql(u8, it.getKey(), key)) {
                     item_next = it.hash_next;
                     continue;
                 }
+
+                // increase refcount
+                it.refcount.refcount += 1;
 
                 return .{
                     .Found = .{
@@ -274,17 +283,32 @@ pub fn ItemService(
             );
         }
 
-        fn tryToEvictItem(self: *Self, item: *Item, slab: SlabClass, _: LockSlot) bool {
+        fn tryToEvictItem(self: *Self, evicted_item: *Item, slab: SlabClass, _: LockSlot) bool {
             self.assertSlabLocked(slab);
 
-            const new_hash = HashFunc.hashKey(self._hasher, item.getKey());
+            const new_hash = HashFunc.hashKey(self._hasher, evicted_item.getKey());
             const new_slot = ItemLocks.getSlot(self._locker, new_hash);
 
+            // TODO do not lock if lock slot the same
+
+            // try to lock the evicted item
             ItemLocks.lock(self._locker, new_slot);
             defer ItemLocks.unlock(self._locker, new_slot);
 
-            LruFuncs.deleteItem(self._lru, slab, item);
-            LruFuncs.putFreeItem(self._lru, slab, item);
+            LruFuncs.deleteItem(self._lru, slab, evicted_item);
+            LruFuncs.putFreeItem(self._lru, slab, evicted_item);
+
+            // remove from bucket list
+            var pitem = self._table.getBucket(new_hash);
+            while (pitem.*) |it | {
+                if (it == evicted_item) {
+                    const next = it.hash_next;
+                    pitem.* = next;
+                    break;
+                }
+                pitem = &it.hash_next;
+            }
+
             return true;
         }
 
@@ -409,6 +433,7 @@ const ServiceTest = struct {
 
     fn putAndFinish(self: *Self, key: String, value_len: usize) void {
         const setter = self.put(key, value_len).?;
+        @memset(setter.item.getValue(), 71);
         self.finishPut(setter);
     }
 
@@ -465,6 +490,29 @@ const ServiceTest = struct {
         var ctx = IterateCtx{};
         self.pager.iterateItemsOfPage(page, slab.item_size, &ctx, IterateCtx.yield);
     }
+
+    fn expectKeyExists(self: *Self, key: String) !void {
+        const getter = self.svc.get(key);
+        try expectEqual(ItemGetter.Found, std.meta.activeTag(getter));
+        const it = getter.Found.item;
+        try std.testing.expectEqualStrings(key, it.getKey());
+    }
+
+    fn expectKeyNotExist(self: *Self, key: String) !void {
+        const getter = self.svc.get(key);
+        try expectEqual(ItemGetter.NotFound, std.meta.activeTag(getter));
+    }
+
+    fn expectNumItemsInBucket(self: *Self, num_items: usize, hash: HashValue) !void {
+        const bucket_next = self.svc._table.getBucket(hash);
+        var next_item = bucket_next.*;
+        var count: usize = 0;
+        while (next_item) |it| {
+            next_item = it.hash_next;
+            count += 1;
+        }
+        try expectEqual(num_items, count);
+    }
 };
 
 test "put then finish" {
@@ -513,15 +561,35 @@ test "put then finish" {
     }, s.locker.actions.items);
 }
 
-test "put then get" {
+test "put => get => get finish" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
     s.putAndFinish(key01, 46);
     s.putAndFinish(key02, 46);
 
+    // clear lock actions
+    s.locker.actions.clearRetainingCapacity();
+
     const get1 = s.get(key01);
     try expectEqual(ItemGetter.Found, std.meta.activeTag(get1));
+    try expectEqual(hash1, get1.Found.hash);
+
+    const it1 = get1.Found.item;
+    try std.testing.expectEqualStrings(key01, it1.getKey());
+    try expectEqual(46, it1.getValue().len);
+    try std.testing.expectEqualSlices(u8, &.{ 71, 71, 71, 71 }, it1.getValue()[0..4]);
+    try expectEqual(2, it1.refcount.refcount);
+    try expectEqual(false, it1.item_flags.is_deleting);
+    try expectEqual(false, it1.item_flags.set_partial);
+
+    // check actions
+    try std.testing.expectEqualSlices(zlock.LockAction, &.{
+        .{ .action = .Lock, .hash = hash1.hash },
+        .{ .action = .Unlock, .hash = hash1.hash },
+    }, s.locker.actions.items);
+
+    // TODO add finish get
 }
 
 test "with eviction" {
@@ -547,6 +615,15 @@ test "with eviction" {
 
     s.finishPut(setter4);
 
-    // TODO check remain items
+    try s.expectKeyNotExist(key01);
+    try s.expectKeyExists(key02);
+    try s.expectKeyExists(key03);
+    try s.expectKeyExists(key04);
+
+    try s.expectNumItemsInBucket(0, hash1);
+    try s.expectNumItemsInBucket(1, hash2);
+    try s.expectNumItemsInBucket(1, hash3);
+    try s.expectNumItemsInBucket(1, hash4);
+
     // TODO handle case same slot
 }

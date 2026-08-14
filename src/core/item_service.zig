@@ -216,6 +216,16 @@ pub fn ItemService(
             found.item.refcount.refcount -= 1;
         }
 
+        pub fn delete(self: *Self, key: String) void {
+            // compute hash value & lock slot
+            const hash_value = HashFunc.hashKey(self._hasher, key);
+            const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
+
+            // lock item
+            ItemLocks.lock(self._locker, lock_slot);
+            defer ItemLocks.unlock(self._locker, lock_slot);
+        }
+
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
             if (null_item1) |it| {
@@ -472,11 +482,24 @@ const ServiceTest = struct {
     }
 
     fn get(self: *Self, key: String) ItemGetter {
-        return self.svc.get(key);
+        const getter = self.svc.get(key);
+        self.checkInvariant();
+        return getter;
     }
 
     fn finishGet(self: *Self, found: ItemFound) void {
-        return self.svc.finishGet(found);
+        self.svc.finishGet(found);
+        self.checkInvariant();
+    }
+
+    fn getAndFinish(self: *Self, key: String) void {
+        const getter = self.get(key);
+        std.debug.assert(std.meta.activeTag(getter) == ItemGetter.Found);
+        self.finishGet(getter.Found);
+    }
+
+    fn delete(self: *Self, key: String) void {
+        return self.svc.delete(key);
     }
 
     fn checkInvariant(self: *Self) void {
@@ -758,4 +781,10 @@ test "with eviction, key01 is locking" {
     try s.expectItemKeysInSlab(SlabClass.init(1), &.{
         key01, key03, key04,
     });
+}
+
+test "put => get => delete" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
 }

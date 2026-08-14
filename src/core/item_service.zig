@@ -581,6 +581,8 @@ const ServiceTest = struct {
 
         var slab_iter = self.slab_conf.getAllSlabClasses();
         while (slab_iter.next()) |slab| {
+            self.checkSlabInvariant(slab.slab_class);
+
             const null_page_list = self.lru_svc.page_queue_map.get(slab.slab_class);
             const page_list = if (null_page_list) |h| h else {
                 continue;
@@ -606,17 +608,24 @@ const ServiceTest = struct {
         }
     }
 
+    fn checkSlabInvariant(_: *Self, _: SlabClass) void {
+    }
+
     fn checkSlabPageInvariant(self: *Self, slab: SlabSize, page_num: PageNum) void {
         const page = self.pager.getPageOfPageNum(page_num);
 
         const IterateCtx = struct {
-            pub fn yield(_: *@This(), _: *Item) bool {
-                // TODO handle
-                // std.debug.assert(item.slab_flags.is_present);
+            slab: SlabClass,
+            pub fn yield(ctx: *@This(), item: *Item) bool {
+                if (item.slab_flags.is_present) {
+                    std.debug.assert(item.slab.slab == ctx.slab.slab);
+                }
                 return true;
             }
         };
-        var ctx = IterateCtx{};
+        var ctx = IterateCtx{
+            .slab = slab.slab_class,
+        };
         self.pager.iterateItemsOfPage(page, slab.item_size, &ctx, IterateCtx.yield);
     }
 

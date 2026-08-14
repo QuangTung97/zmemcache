@@ -124,7 +124,7 @@ pub fn ItemService(
 
             // compute slab class & item size
             const raw_item_size = Item.computeItemSize(key.len, value_len);
-            const slab_size = self._slab_conf.getItemSlab(raw_item_size);
+            const slab_size = self._slab_conf.getSlabFromItemSize(raw_item_size);
             const slab = slab_size.slab_class;
 
             // lock with item locks
@@ -581,12 +581,13 @@ const ServiceTest = struct {
 
         var slab_iter = self.slab_conf.getAllSlabClasses();
         while (slab_iter.next()) |slab| {
-            self.checkSlabInvariant(slab.slab_class);
-
             const null_page_list = self.lru_svc.page_queue_map.get(slab.slab_class);
             const page_list = if (null_page_list) |h| h else {
                 continue;
             };
+
+            const num_pages = page_list.len;
+            self.checkSlabInvariant(slab.slab_class, num_pages);
 
             var it = page_list.iterator();
             while (it.next()) |page_num| {
@@ -608,7 +609,50 @@ const ServiceTest = struct {
         }
     }
 
-    fn checkSlabInvariant(_: *Self, _: SlabClass) void {
+    fn checkSlabInvariant(self: *Self, slab: SlabClass, num_pages: usize) void {
+        // check lru list
+        var lru_ctx = struct {
+            slab: SlabClass,
+            self: *Self,
+            total: usize,
+            pub fn yield(ctx: *@This(), item: *Item) bool {
+                ctx.total += 1;
+
+                std.debug.assert(item.slab_flags.is_present);
+                std.debug.assert(item.slab.slab == ctx.slab.slab);
+                ctx.self.checkItemInSlab(item, ctx.slab);
+                return true;
+            }
+        }{
+            .slab = slab,
+            .self = self,
+            .total = 0,
+        };
+        self.lru_svc.iterateItems(slab, ItemIter.init(&lru_ctx));
+
+        // check free list
+        const null_free_list = self.lru_svc.free_map.get(slab);
+        var total_free_items: usize = 0;
+        if (null_free_list) |free_list| {
+            var it = free_list.iterate();
+            while (it.next()) |n| {
+                total_free_items += 1;
+                const item = Item.fromList(n);
+                std.debug.assert(!item.slab_flags.is_present);
+                self.checkItemInSlab(item, slab);
+            }
+        }
+
+        // check total number of items
+        const item_size = self.slab_conf.getItemSizeOfSlab(slab);
+        const num_items_per_page = self.pager.getNumItemsPerPage(item_size);
+        std.debug.assert(num_pages * num_items_per_page == lru_ctx.total + total_free_items);
+    }
+
+    fn checkItemInSlab(self: *Self, item: *Item, slab: SlabClass) void {
+        const page_num = self.pager.getPageNumOfItem(item);
+        const page_slab = self.pager.getSlabClass(page_num).?;
+        std.debug.assert(slab.slab == page_slab.slab);
     }
 
     fn checkSlabPageInvariant(self: *Self, slab: SlabSize, page_num: PageNum) void {
@@ -689,7 +733,7 @@ test "put then finish" {
     // check basic setter info
     try expectEqual(hash1, setter.hash);
     try expectEqual(SlabClass.init(1), setter.item.slab);
-    try expectEqual(144, s.slab_conf.getSlabSize(setter.item.slab));
+    try expectEqual(144, s.slab_conf.getItemSizeOfSlab(setter.item.slab));
 
     // check item key
     try expectEqual(Item.Size + key01.len + 46, setter.item.getItemSize());

@@ -153,7 +153,7 @@ pub const GlobalPager = struct {
         std.debug.assertAligned(page, Item.Alignment);
         std.debug.assert(Item.Alignment.check(item_size));
 
-        const num_items = self.priv.page_size / item_size;
+        const num_items = self.getNumItemsPerPage(item_size);
         var current_addr: [*]align(ItemAlignBytes) u8 = page.ptr;
 
         for (0..num_items) |_| {
@@ -164,6 +164,10 @@ pub const GlobalPager = struct {
             }
             current_addr = @alignCast(current_addr + item_size);
         }
+    }
+
+    pub fn getNumItemsPerPage(self: *const Self, item_size: usize) usize {
+        return self.priv.page_size / item_size;
     }
 
     pub fn getBaseAddr(self: *const Self) [*]u8 {

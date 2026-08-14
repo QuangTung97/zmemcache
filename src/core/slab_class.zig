@@ -83,7 +83,7 @@ pub const SlabClassConfig = struct {
         self._all_classes.deinit(self._gpa);
     }
 
-    pub fn getItemSlab(self: *const Self, item_size: usize) SlabSize {
+    pub fn getSlabFromItemSize(self: *const Self, item_size: usize) SlabSize {
         const index = self.lowerBound(item_size);
 
         std.debug.assert(index <= SlabClass.MaxValue);
@@ -92,7 +92,7 @@ pub const SlabClassConfig = struct {
         return .init(slab, self._all_classes.items[index]);
     }
 
-    pub fn getSlabSize(self: *const Self, slab: SlabClass) usize {
+    pub fn getItemSizeOfSlab(self: *const Self, slab: SlabClass) usize {
         return self._all_classes.items[slab.slab];
     }
 
@@ -136,16 +136,16 @@ test "normal" {
     }
 
     // get slab class
-    try expectEqual(SlabSize.init(0, 96), conf.getItemSlab(95));
-    try expectEqual(SlabSize.init(0, 96), conf.getItemSlab(50));
-    try expectEqual(SlabSize.init(0, 96), conf.getItemSlab(96));
-    try expectEqual(SlabSize.init(1, 144), conf.getItemSlab(97));
+    try expectEqual(SlabSize.init(0, 96), conf.getSlabFromItemSize(95));
+    try expectEqual(SlabSize.init(0, 96), conf.getSlabFromItemSize(50));
+    try expectEqual(SlabSize.init(0, 96), conf.getSlabFromItemSize(96));
+    try expectEqual(SlabSize.init(1, 144), conf.getSlabFromItemSize(97));
 
-    try expectEqual(SlabSize.init(4, 488), conf.getItemSlab(488));
-    try expectEqual(SlabSize.init(5, 736), conf.getItemSlab(489));
+    try expectEqual(SlabSize.init(4, 488), conf.getSlabFromItemSize(488));
+    try expectEqual(SlabSize.init(5, 736), conf.getSlabFromItemSize(489));
 
-    try expectEqual(96, conf.getSlabSize(SlabClass.init(0)));
-    try expectEqual(144, conf.getSlabSize(SlabClass.init(1)));
+    try expectEqual(96, conf.getItemSizeOfSlab(SlabClass.init(0)));
+    try expectEqual(144, conf.getItemSizeOfSlab(SlabClass.init(1)));
 
     // get all sizes
     try zutil.expectIteratorValues(SlabSize, &.{

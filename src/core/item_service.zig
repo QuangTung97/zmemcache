@@ -187,6 +187,7 @@ pub fn ItemService(
 
                 // increase refcount
                 it.refcount.refcount += 1;
+                LruFuncs.touchItem(self._lru, it.slab, it);
 
                 return .{
                     .Found = .{
@@ -300,7 +301,7 @@ pub fn ItemService(
 
             // remove from bucket list
             var pitem = self._table.getBucket(new_hash);
-            while (pitem.*) |it | {
+            while (pitem.*) |it| {
                 if (it == evicted_item) {
                     const next = it.hash_next;
                     pitem.* = next;
@@ -349,6 +350,8 @@ const hash3 = HashValue.init(23);
 
 const key04 = "key04";
 const hash4 = HashValue.init(24);
+
+const TouchItem = zlru.FakeLruService.TouchItem;
 
 const ServiceTest = struct {
     const ServiceType = ItemService(
@@ -513,6 +516,16 @@ const ServiceTest = struct {
         }
         try expectEqual(num_items, count);
     }
+
+    fn expectTouchList(self: *Self, expected: []const TouchItem) !void {
+        const actual_list = self.lru_svc.touch_list.items;
+        try expectEqual(expected.len, actual_list.len);
+
+        for (actual_list, 0..) |x, index| {
+            try expectEqual(expected[index].slab, x.slab);
+            try std.testing.expectEqualStrings(expected[index].key, x.key);
+        }
+    }
 };
 
 test "put then finish" {
@@ -589,6 +602,11 @@ test "put => get => get finish" {
         .{ .action = .Unlock, .hash = hash1.hash },
     }, s.locker.actions.items);
 
+    // check touch list
+    try s.expectTouchList(&.{
+        TouchItem.init(SlabClass.init(1), key01),
+    });
+
     // TODO add finish get
 }
 
@@ -619,6 +637,13 @@ test "with eviction" {
     try s.expectKeyExists(key02);
     try s.expectKeyExists(key03);
     try s.expectKeyExists(key04);
+
+    // check touch list
+    try s.expectTouchList(&.{
+        TouchItem.init(SlabClass.init(1), key02),
+        TouchItem.init(SlabClass.init(1), key03),
+        TouchItem.init(SlabClass.init(1), key04),
+    });
 
     try s.expectNumItemsInBucket(0, hash1);
     try s.expectNumItemsInBucket(1, hash2);

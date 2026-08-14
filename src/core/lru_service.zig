@@ -62,17 +62,28 @@ pub const FakeLruService = struct {
     const PageQueue = std.Deque(PageNum);
     const PageQueueMap = std.AutoHashMap(Slab, *PageQueue);
 
+    pub const TouchItem = struct {
+        slab: Slab,
+        key: []const u8,
+        pub fn init(slab: Slab, key: []const u8) @This() {
+            return .{ .slab = slab, .key = key };
+        }
+    };
+    const TouchList = std.ArrayList(TouchItem);
+
     gpa: Allocator,
     locked_set: LockedSetType,
     lru_map: SlabMap,
     free_map: SlabMap,
     page_queue_map: PageQueueMap,
+    touch_list: TouchList,
 
     pub fn init(gpa: Allocator) Self {
         const locked_set = LockedSetType.init(gpa);
         const lru_map = SlabMap.init(gpa);
         const free_map = SlabMap.init(gpa);
         const page_queue_map = PageQueueMap.init(gpa);
+        const touch_list = TouchList.empty;
 
         return .{
             .gpa = gpa,
@@ -80,10 +91,12 @@ pub const FakeLruService = struct {
             .lru_map = lru_map,
             .free_map = free_map,
             .page_queue_map = page_queue_map,
+            .touch_list = touch_list,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.touch_list.deinit(self.gpa);
         self.destroyPageQueueMap();
         destroyMap(self.gpa, &self.free_map);
         destroyMap(self.gpa, &self.lru_map);
@@ -126,7 +139,10 @@ pub const FakeLruService = struct {
         head.pushBack(&item.lru_list);
     }
 
-    pub fn touchItem(_: *Self, _: Slab, _: *Item) void {}
+    pub fn touchItem(self: *Self, slab: Slab, item: *Item) void {
+        const entry = TouchItem.init(slab, item.getKey());
+        self.touch_list.append(self.gpa, entry) catch unreachable;
+    }
 
     pub fn deleteItem(_: *Self, _: Slab, item: *Item) void {
         item.lru_list.remove();

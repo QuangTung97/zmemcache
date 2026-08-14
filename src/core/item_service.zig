@@ -68,6 +68,7 @@ pub const ItemFound = struct {
 pub const ItemGetter = union(enum) {
     Found: ItemFound,
     NotFound: struct {},
+    SetPartial: struct {},
 };
 
 pub fn ItemService(
@@ -170,7 +171,7 @@ pub fn ItemService(
             defer ItemLocks.unlock(self._locker, slot);
 
             setter.item.item_flags.set_partial = false;
-            setter.item.refcount.refcount -= 1;
+            self.decreaseRefcountAndDelete(setter.hash, setter.item);
         }
 
         pub fn get(self: *Self, key: String) ItemGetter {
@@ -187,6 +188,10 @@ pub fn ItemService(
             const it = if (null_item) |p| p else {
                 return .{ .NotFound = .{} };
             };
+
+            if (it.item_flags.set_partial) {
+                return .{ .SetPartial = .{} };
+            }
 
             // increase refcount
             it.refcount.refcount += 1;
@@ -207,7 +212,7 @@ pub fn ItemService(
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
-            self.decreaseRefcountAndDelete(found.item);
+            self.decreaseRefcountAndDelete(found.hash, found.item);
         }
 
         pub fn delete(self: *Self, key: String) void {
@@ -225,7 +230,7 @@ pub fn ItemService(
                 return;
             };
 
-            self.doDeleteItem(it, pitem);
+            self.doDeleteItem(hash_value, it, pitem);
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
@@ -340,20 +345,23 @@ pub fn ItemService(
                 return false;
             }
 
-            self.doDeleteItem(deleted_item, pitem);
+            self.doDeleteItem(hash, deleted_item, pitem);
             return true;
         }
 
-        fn doDeleteItem(self: *Self, deleted_item: *Item, pitem: *NullItem) void {
+        fn doDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item, pitem: *NullItem) void {
+            // unlink from bucket
             const next = deleted_item.hash_next;
             pitem.* = next;
 
-            self.decreaseRefcountAndDelete(deleted_item);
+            // try to remove from lru
+            deleted_item.item_flags.is_deleting = true;
+            self.decreaseRefcountAndDelete(hash, deleted_item);
         }
 
-        fn decreaseRefcountAndDelete(self: *Self, deleted_item: *Item) void {
+        fn decreaseRefcountAndDelete(self: *Self, hash: HashValue, deleted_item: *Item) void {
+            self.assertItemLocked(hash);
             deleted_item.refcount.refcount -= 1;
-            deleted_item.item_flags.is_deleting = true;
 
             if (deleted_item.refcount.refcount > 0) {
                 return;
@@ -618,6 +626,7 @@ const ServiceTest = struct {
         var ctx = struct {
             all_keys: std.ArrayList(String),
             pub fn yield(ctx: *@This(), item: *Item) bool {
+                std.debug.assert(item.slab_flags.is_present);
                 ctx.all_keys.append(gpa, item.getKey()) catch unreachable;
                 return true;
             }
@@ -899,4 +908,31 @@ test "put => get => delete => finish get" {
     try expectEqual(false, it.slab_flags.is_present);
     try expectEqual(true, it.item_flags.is_deleting);
     try expectEqual(false, it.item_flags.set_partial);
+}
+
+test "put => get => put finish" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    const setter1 = s.put(key01, 46).?;
+
+    const getter1 = s.get(key01);
+    try expectEqual(ItemGetter.SetPartial, std.meta.activeTag(getter1));
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{key01});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{key01});
+
+    // delete
+    s.delete(key01);
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{key01});
+
+    s.finishPut(setter1);
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{});
 }

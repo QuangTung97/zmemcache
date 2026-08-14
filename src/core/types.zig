@@ -37,7 +37,10 @@ pub const Item = struct {
 
     slab_flags: SlabFlags, // protected by slab lock
     item_flags: ItemFlags, // protected by item lock
+
     key_len: u8, // constant
+    slab: SlabClass, // constant
+
     is_touched: std.atomic.Value(bool), // set = true when touched
 
     refcount: RefCount, // protected by item lock
@@ -51,7 +54,7 @@ pub const Item = struct {
 
     // key data & item data are protected by item lock
 
-    pub fn init(key_len: usize, value_len: usize, cas: CasNum) Self {
+    pub fn init(slab: SlabClass, key_len: usize, value_len: usize, cas: CasNum) Self {
         const it: Self = .{
             .slab_flags = SlabFlags{
                 .is_present = true,
@@ -67,6 +70,7 @@ pub const Item = struct {
             .refcount = RefCount.init(1),
             .cas_num = cas,
 
+            .slab = slab,
             .key_len = @intCast(key_len),
             .value_len = @intCast(value_len),
         };
@@ -124,8 +128,12 @@ pub const LockSlot = struct {
 };
 
 pub const SlabClass = struct {
-    slab: u32,
-    pub fn init(x: u32) @This() {
+    pub const IntType = u8;
+    pub const MaxValue = std.math.maxInt(IntType);
+
+    slab: IntType,
+
+    pub fn init(x: IntType) @This() {
         return .{ .slab = x };
     }
 };
@@ -190,6 +198,10 @@ test "check item size" {
     try expectEqual(false, Item.Alignment.check(19));
     try expectEqual(false, Item.Alignment.check(20));
     try expectEqual(true, Item.Alignment.check(24));
+}
+
+test "slab class" {
+    try expectEqual(255, SlabClass.MaxValue);
 }
 
 test "item getter" {

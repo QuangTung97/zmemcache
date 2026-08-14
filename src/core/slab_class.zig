@@ -10,7 +10,7 @@ pub const SlabSize = struct {
     slab_class: SlabClass,
     item_size: usize,
 
-    pub fn init(slab: u32, size: usize) @This() {
+    pub fn init(slab: SlabClass.IntType, size: usize) @This() {
         return .{
             .slab_class = SlabClass.init(slab),
             .item_size = size,
@@ -69,6 +69,10 @@ pub const SlabClassConfig = struct {
             try all_classes.append(gpa, max_size);
         }
 
+        if (all_classes.items.len >= SlabClass.MaxValue) {
+            @panic("too many slab classes");
+        }
+
         return .{
             ._gpa = gpa,
             ._all_classes = all_classes,
@@ -81,7 +85,10 @@ pub const SlabClassConfig = struct {
 
     pub fn getItemSlab(self: *const Self, item_size: usize) SlabSize {
         const index = self.lowerBound(item_size);
-        const slab: u32 = @intCast(index);
+
+        std.debug.assert(index <= SlabClass.MaxValue);
+        const slab: SlabClass.IntType = @intCast(index);
+
         return .init(slab, self._all_classes.items[index]);
     }
 

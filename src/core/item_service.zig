@@ -22,14 +22,20 @@ const String = []const u8;
 
 const HashTable = struct {
     gpa: std.mem.Allocator,
-    buckets: []?*types.Item,
+    buckets: []?*Item,
     mask: u64,
 
     const Self = @This();
 
     fn init(gpa: std.mem.Allocator, hash_size_log: u6) !Self {
         const table_size = @as(u64, 1) << hash_size_log;
-        const buckets = try gpa.alloc(?*types.Item, table_size);
+
+        // init buckets
+        const buckets = try gpa.alloc(?*Item, table_size);
+        for (buckets) |*next| {
+            next.* = null;
+        }
+
         return .{
             .gpa = gpa,
             .buckets = buckets,
@@ -37,19 +43,26 @@ const HashTable = struct {
         };
     }
 
-    fn deinit(self: Self) void {
+    fn deinit(self: *Self) void {
         self.gpa.free(self.buckets);
+    }
+
+    fn getBucket(self: *Self, hash: HashValue) ?*Item {
+        const index = hash.hash & self.mask;
+        return self.buckets[index];
     }
 };
 
 pub const ItemSetter = struct {
     hash: HashValue,
-    slab: SlabClass,
     item: *Item,
 };
 
 pub const ItemGetter = union(enum) {
-    Found: struct {},
+    Found: struct {
+        hash: HashValue,
+        item: *Item,
+    },
     NotFound: struct {},
 };
 
@@ -125,7 +138,7 @@ pub fn ItemService(
 
             // init item
             const cas_num = self.nextCasNum();
-            it.* = Item.init(key.len, value_len, cas_num);
+            it.* = Item.init(slab, key.len, value_len, cas_num);
             it.item_flags.set_partial = true;
             it.refcount.refcount += 1;
 
@@ -137,7 +150,6 @@ pub fn ItemService(
 
             return .{
                 .hash = hash_value,
-                .slab = slab,
                 .item = it,
             };
         }
@@ -152,7 +164,29 @@ pub fn ItemService(
             setter.item.refcount.refcount -= 1;
         }
 
-        pub fn get(_: *Self, _: String) ItemGetter {
+        pub fn get(self: *Self, key: String) ItemGetter {
+            // compute hash value & lock slot
+            const hash_value = HashFunc.hashKey(self._hasher, key);
+            const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
+
+            ItemLocks.lock(self._locker, lock_slot);
+            defer ItemLocks.unlock(self._locker, lock_slot);
+
+            var item_next = self._table.getBucket(hash_value);
+            while (item_next) |it| {
+                if (!std.mem.eql(u8, it.getKey(), key)) {
+                    item_next = it.hash_next;
+                    continue;
+                }
+
+                return .{
+                    .Found = .{
+                        .hash = hash_value,
+                        .item = it,
+                    },
+                };
+            }
+
             return .{
                 .NotFound = .{},
             };
@@ -274,7 +308,7 @@ const expectEqual = std.testing.expectEqual;
 test "hash table" {
     try expectEqual(8 * 5, @sizeOf(HashTable));
 
-    const h = try HashTable.init(std.testing.allocator, 5);
+    var h = try HashTable.init(std.testing.allocator, 5);
     defer h.deinit();
 
     try expectEqual(0b11111, h.mask);
@@ -378,10 +412,18 @@ const ServiceTest = struct {
         self.finishPut(setter);
     }
 
+    fn get(self: *Self, key: String) ItemGetter {
+        return self.svc.get(key);
+    }
+
     fn checkInvariant(self: *Self) void {
         const gpa = std.testing.allocator;
+
         var slab_page_map = std.AutoHashMap(SlabClass, PageNum).init(gpa);
         defer slab_page_map.deinit();
+
+        var inuse_pages = std.AutoHashMap(PageNum, struct {}).init(gpa);
+        defer inuse_pages.deinit();
 
         var slab_iter = self.slab_conf.getAllSlabClasses();
         while (slab_iter.next()) |slab| {
@@ -392,6 +434,7 @@ const ServiceTest = struct {
 
             var it = page_list.iterator();
             while (it.next()) |page_num| {
+                inuse_pages.put(page_num, .{}) catch unreachable;
                 slab_page_map.put(slab.slab_class, page_num) catch unreachable;
                 self.checkSlabPageInvariant(slab, page_num);
             }
@@ -399,27 +442,29 @@ const ServiceTest = struct {
 
         var page_iter = self.pager.getAllPages();
         while (page_iter.next()) |page_num| {
-            const slab = self.pager.getSlabClass(page_num);
-            if (slab.slab == zpage.MaxSlab) {
-                std.debug.assert(!slab_page_map.contains(slab));
-            } else {
+            const null_slab = self.pager.getSlabClass(page_num);
+            if (null_slab) |slab| {
+                std.debug.assert(inuse_pages.contains(page_num));
                 std.debug.assert(slab_page_map.get(slab).?.page_num == page_num.page_num);
+            } else {
+                std.debug.assert(!inuse_pages.contains(page_num));
             }
         }
     }
 
-    fn checkSlabPageInvariant(_: *Self, _: SlabSize, _: PageNum) void {
-        // TODO
-    }
+    fn checkSlabPageInvariant(self: *Self, slab: SlabSize, page_num: PageNum) void {
+        const page = self.pager.getPageOfPageNum(page_num);
 
-    // TODO
-    // fn expectPageItemKeys(
-    //     self: *Self,
-    //     page: PageNum, slab: SlabClass,
-    //     keys: []const String,
-    // ) !void {
-    //     self.pager.iterateItemsOfPage(page);
-    // }
+        const IterateCtx = struct {
+            pub fn yield(_: *@This(), _: *Item) bool {
+                // TODO handle
+                // std.debug.assert(item.slab_flags.is_present);
+                return true;
+            }
+        };
+        var ctx = IterateCtx{};
+        self.pager.iterateItemsOfPage(page, slab.item_size, &ctx, IterateCtx.yield);
+    }
 };
 
 test "put then finish" {
@@ -431,8 +476,8 @@ test "put then finish" {
 
     // check basic setter info
     try expectEqual(hash1, setter.hash);
-    try expectEqual(SlabClass.init(1), setter.slab);
-    try expectEqual(144, s.slab_conf.getSlabSize(setter.slab));
+    try expectEqual(SlabClass.init(1), setter.item.slab);
+    try expectEqual(144, s.slab_conf.getSlabSize(setter.item.slab));
 
     // check item key
     try expectEqual(Item.Size + key01.len + 46, setter.item.getItemSize());
@@ -466,6 +511,17 @@ test "put then finish" {
         .{ .action = .Lock, .hash = hash1.hash },
         .{ .action = .Unlock, .hash = hash1.hash },
     }, s.locker.actions.items);
+}
+
+test "put then get" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, 46);
+    s.putAndFinish(key02, 46);
+
+    const get1 = s.get(key01);
+    try expectEqual(ItemGetter.Found, std.meta.activeTag(get1));
 }
 
 test "with eviction" {

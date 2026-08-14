@@ -3,6 +3,7 @@ const types = @import("types.zig");
 const zutil = @import("zutil");
 
 const Item = types.Item;
+const SlabClass = types.SlabClass;
 
 const ItemAlignBytes = Item.Alignment.toByteUnits();
 
@@ -15,9 +16,12 @@ pub const PageNum = struct {
     }
 };
 
-pub const MaxSlab: u32 = 0xffffffff;
+pub const AtomicSlabNull= std.math.maxInt(u64);
 
 pub const GlobalPager = struct {
+    const Self = @This();
+    const AtomicSlab = std.atomic.Value(u64);
+
     priv: struct {
         io: std.Io,
         gpa: std.mem.Allocator,
@@ -28,10 +32,8 @@ pub const GlobalPager = struct {
         all_pages: []align(ItemAlignBytes) u8,
         num_empty_pages: std.atomic.Value(u64),
         mut: std.Io.Mutex,
-        pages_to_slab: []std.atomic.Value(u32),
+        pages_to_slab: []AtomicSlab,
     },
-
-    const Self = @This();
 
     pub fn init(
         io: std.Io,
@@ -47,10 +49,10 @@ pub const GlobalPager = struct {
         );
         std.debug.assertAligned(all_pages, Item.Alignment);
 
-        const pages_to_slab = try gpa.alloc(std.atomic.Value(u32), num_pages);
-
+        // init page to slab array
+        const pages_to_slab = try gpa.alloc(AtomicSlab, num_pages);
         for (pages_to_slab) |*x| {
-            x.* = .init(MaxSlab);
+            x.* = .init(AtomicSlabNull);
         }
 
         return .{
@@ -116,6 +118,12 @@ pub const GlobalPager = struct {
         return .{ .page_num = page_num };
     }
 
+    pub fn getPageOfPageNum(self: *const Self, page_num: PageNum) Page {
+        const start_offset = page_num.page_num * self.priv.page_size;
+        const end_offset = start_offset + self.priv.page_size;
+        return @alignCast(self.priv.all_pages[start_offset..end_offset]);
+    }
+
     pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: types.SlabClass) void {
         const this = &self.priv;
         const num_pages = this.pages_to_slab.len;
@@ -123,9 +131,15 @@ pub const GlobalPager = struct {
         this.pages_to_slab[page_num.page_num].store(slab.slab, .seq_cst);
     }
 
-    pub fn getSlabClass(self: *const Self, page_num: PageNum) types.SlabClass {
+    pub fn getSlabClass(self: *const Self, page_num: PageNum) ?types.SlabClass {
+        const slab_num = self.priv.pages_to_slab[page_num.page_num].load(.seq_cst);
+        if (slab_num == AtomicSlabNull) {
+            return null;
+        }
+
+        std.debug.assert(slab_num <= SlabClass.MaxValue);
         return .{
-            .slab = self.priv.pages_to_slab[page_num.page_num].load(.seq_cst),
+            .slab = @intCast(slab_num),
         };
     }
 
@@ -185,7 +199,7 @@ pub const GlobalPager = struct {
 const expectEqual = std.testing.expectEqual;
 
 test "max slab" {
-    try std.testing.expect(MaxSlab > 1_000_000);
+    try std.testing.expect(AtomicSlabNull > 1_000_000);
 }
 
 test "basic" {
@@ -199,8 +213,8 @@ test "basic" {
 
     try expectEqual(3 * 1024 * 1024, g.priv.all_pages.len);
     try expectEqual(3, g.priv.pages_to_slab.len);
-    try expectEqual(0xffff_ffff, g.priv.pages_to_slab[0].load(.seq_cst));
-    try expectEqual(0xffff_ffff, g.priv.pages_to_slab[2].load(.seq_cst));
+    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[0].load(.seq_cst));
+    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[2].load(.seq_cst));
 
     // test allocate pages
     const p1 = g.allocPage(.{ .slab = 11 }).?;
@@ -225,16 +239,21 @@ test "basic" {
         PageNum.init(2),
     }, g.getAllPages());
 
+    // check page num <=> page
+    const page_num2 = g.getPageNumOfPage(p2);
+    try expectEqual(PageNum.init(1), page_num2);
+    try expectEqual(p2, g.getPageOfPageNum(page_num2));
+
     // test get page num
     const item1: *Item = @ptrCast(@alignCast(p1));
     const num1 = g.getPageNumOfItem(item1);
     try expectEqual(0, num1.page_num);
-    try expectEqual(11, g.getSlabClass(num1).slab);
+    try expectEqual(11, g.getSlabClass(num1).?.slab);
 
     const item2: *Item = @ptrCast(@alignCast(p2));
     const num2 = g.getPageNumOfItem(item2);
     try expectEqual(1, num2.page_num);
-    try expectEqual(12, g.getSlabClass(num2).slab);
+    try expectEqual(12, g.getSlabClass(num2).?.slab);
 
     // check get page number
     const item3: *Item = @ptrCast(@alignCast(p3));

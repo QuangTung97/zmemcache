@@ -12,7 +12,6 @@ pub const SlabFlags = packed struct {
 };
 
 pub const ItemFlags = packed struct {
-    is_deleting: bool,
     set_partial: bool,
 };
 
@@ -61,7 +60,6 @@ pub const Item = struct {
                 .lru_list = .Hot,
             },
             .item_flags = ItemFlags{
-                .is_deleting = false,
                 .set_partial = false,
             },
             .is_touched = .init(false),

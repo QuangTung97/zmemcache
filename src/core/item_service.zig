@@ -290,20 +290,17 @@ pub fn ItemService(
 
             var ctx = struct {
                 self: *Self,
-                slab: SlabClass,
                 current_slot: LockSlot,
                 pub fn yield(ctx: *@This(), item: *Item) bool {
                     // TODO limit number of attempts
                     const ok = ctx.self.tryToEvictItem(
                         item,
-                        ctx.slab,
                         ctx.current_slot,
                     );
                     return !ok;
                 }
             }{
                 .self = self,
-                .slab = slab,
                 .current_slot = current_slot,
             };
 
@@ -315,7 +312,8 @@ pub fn ItemService(
             );
         }
 
-        fn tryToEvictItem(self: *Self, evicted_item: *Item, slab: SlabClass, current_slot: LockSlot) bool {
+        fn tryToEvictItem(self: *Self, evicted_item: *Item, current_slot: LockSlot) bool {
+            const slab = evicted_item.slab;
             self.assertSlabLocked(slab);
 
             const new_hash = HashFunc.hashKey(self._hasher, evicted_item.getKey());
@@ -323,7 +321,7 @@ pub fn ItemService(
 
             // do not lock if lock slot the same
             if (current_slot.lock_slot == new_slot.lock_slot) {
-                return self.findInBucketAndDeleteItem(new_hash, evicted_item);
+                return self.checkEvictCondAndDeleteItem(new_hash, evicted_item);
             }
 
             // try to lock the evicted item
@@ -333,11 +331,15 @@ pub fn ItemService(
             }
             defer ItemLocks.unlock(self._locker, new_slot);
 
-            return self.findInBucketAndDeleteItem(new_hash, evicted_item);
+            return self.checkEvictCondAndDeleteItem(new_hash, evicted_item);
         }
 
-        fn findInBucketAndDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item) bool {
+        fn checkEvictCondAndDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item) bool {
             self.assertItemLocked(hash);
+
+            if (deleted_item.refcount.refcount != 1) {
+                return false;
+            }
 
             const pitem = self.findItemPointerInBucket(hash, deleted_item);
             const null_item = pitem.*;
@@ -355,7 +357,6 @@ pub fn ItemService(
             pitem.* = next;
 
             // try to remove from lru
-            deleted_item.item_flags.is_deleting = true;
             self.decreaseRefcountAndDelete(hash, deleted_item);
         }
 
@@ -462,14 +463,19 @@ const hash4 = HashValue.init(24);
 const TouchItem = zlru.FakeLruService.TouchItem;
 
 const ServiceTest = struct {
+    const HashFunc = types.NewHashFunc(types.FakeHashFunc);
+    const ItemLocks = zlock.NewItemLockFuncs(zlock.FakeItemLocks);
+    const LruFuncs = zlru.NewLruFuncs(zlru.FakeLruService);
+
     const ServiceType = ItemService(
         types.FakeHashFunc,
         zlock.FakeItemLocks,
         zlru.FakeLruService,
-        types.NewHashFunc(types.FakeHashFunc),
-        zlock.NewItemLockFuncs(zlock.FakeItemLocks),
-        zlru.NewLruFuncs(zlru.FakeLruService),
+        HashFunc,
+        ItemLocks,
+        LruFuncs,
     );
+
     const Self = @This();
 
     gpa: Allocator,
@@ -568,6 +574,40 @@ const ServiceTest = struct {
     fn delete(self: *Self, key: String) void {
         self.svc.delete(key);
         self.checkInvariant();
+    }
+
+    fn tryEvictKey(self: *Self, key: String) bool {
+        // compute hash value & lock slot
+        const hash_value = HashFunc.hashKey(self.svc._hasher, key);
+        const lock_slot = ItemLocks.getSlot(self.svc._locker, hash_value);
+
+        ItemLocks.lock(self.svc._locker, lock_slot);
+        defer ItemLocks.unlock(self.svc._locker, lock_slot);
+
+        const pitem = self.svc.findItemPointerWithKey(hash_value, key);
+        const null_item = pitem.*;
+        const item = null_item.?;
+        const slab = item.slab;
+
+        LruFuncs.lockSlab(self.svc._lru, slab);
+        defer LruFuncs.unlockSlab(self.svc._lru, slab);
+
+        return self.svc.tryToEvictItem(item, lock_slot);
+    }
+
+    fn tryEvictKeyItem(self: *Self, item: *Item) bool {
+        // compute hash value & lock slot
+        const hash_value = HashFunc.hashKey(self.svc._hasher, item.getKey());
+        const lock_slot = ItemLocks.getSlot(self.svc._locker, hash_value);
+
+        ItemLocks.lock(self.svc._locker, lock_slot);
+        defer ItemLocks.unlock(self.svc._locker, lock_slot);
+
+        const slab = item.slab;
+        LruFuncs.lockSlab(self.svc._lru, slab);
+        defer LruFuncs.unlockSlab(self.svc._lru, slab);
+
+        return self.svc.tryToEvictItem(item, lock_slot);
     }
 
     fn checkInvariant(self: *Self) void {
@@ -723,12 +763,16 @@ const ServiceTest = struct {
     }
 };
 
+const test_val_len = 98 - key01.len - Item.Size;
+
 test "put then finish" {
+    try expectEqual(45, test_val_len);
+
     const s = try ServiceTest.init(.{});
     defer s.deinit();
 
     // put
-    const setter = s.put(key01, 46).?;
+    const setter = s.put(key01, test_val_len).?;
 
     // check basic setter info
     try expectEqual(hash1, setter.hash);
@@ -736,12 +780,11 @@ test "put then finish" {
     try expectEqual(144, s.slab_conf.getItemSizeOfSlab(setter.item.slab));
 
     // check item key
-    try expectEqual(Item.Size + key01.len + 46, setter.item.getItemSize());
+    try expectEqual(Item.Size + key01.len + test_val_len, setter.item.getItemSize());
     try std.testing.expectEqualStrings(key01, setter.item.getKey());
 
     // check flags
     try expectEqual(true, setter.item.slab_flags.is_present);
-    try expectEqual(false, setter.item.item_flags.is_deleting);
     try expectEqual(true, setter.item.item_flags.set_partial);
     try expectEqual(2, setter.item.refcount.refcount);
 
@@ -749,14 +792,13 @@ test "put then finish" {
     try expectEqual(144 * 2, setter.item.toItemAddr() - s.pager.getBaseAddr());
 
     // set value
-    try expectEqual(46, setter.item.getValue().len);
+    try expectEqual(test_val_len, setter.item.getValue().len);
     @memset(setter.item.getValue(), 'A');
 
     s.finishPut(setter);
 
     // check flags
     try expectEqual(true, setter.item.slab_flags.is_present);
-    try expectEqual(false, setter.item.item_flags.is_deleting);
     try expectEqual(false, setter.item.item_flags.set_partial);
     try expectEqual(1, setter.item.refcount.refcount);
 
@@ -773,8 +815,8 @@ test "put => get => finish get" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    s.putAndFinish(key01, 46);
-    s.putAndFinish(key02, 46);
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
 
     // clear lock actions
     s.locker.actions.clearRetainingCapacity();
@@ -785,10 +827,9 @@ test "put => get => finish get" {
 
     const it1 = get1.Found.item;
     try std.testing.expectEqualStrings(key01, it1.getKey());
-    try expectEqual(46, it1.getValue().len);
+    try expectEqual(test_val_len, it1.getValue().len);
     try std.testing.expectEqualSlices(u8, &.{ 71, 71, 71, 71 }, it1.getValue()[0..4]);
     try expectEqual(2, it1.refcount.refcount);
-    try expectEqual(false, it1.item_flags.is_deleting);
     try expectEqual(false, it1.item_flags.set_partial);
 
     // check actions
@@ -820,14 +861,14 @@ test "with eviction" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    s.putAndFinish(key01, 46);
-    s.putAndFinish(key02, 46);
-    s.putAndFinish(key03, 46);
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+    s.putAndFinish(key03, test_val_len);
 
     // clear lock actions
     s.locker.actions.clearRetainingCapacity();
 
-    const setter4 = s.put(key04, 46).?;
+    const setter4 = s.put(key04, test_val_len).?;
 
     // check actions
     try std.testing.expectEqualSlices(zlock.LockAction, &.{
@@ -853,16 +894,16 @@ test "with eviction same hash" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    s.putAndFinish(key01, 46);
-    s.putAndFinish(key02, 46);
-    s.putAndFinish(key03, 46);
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+    s.putAndFinish(key03, test_val_len);
 
     s.hash_func.putKeyHash(key04, hash1);
 
     // clear lock actions
     s.locker.actions.clearRetainingCapacity();
 
-    const setter4 = s.put(key04, 46).?;
+    const setter4 = s.put(key04, test_val_len).?;
 
     // check actions
     try std.testing.expectEqualSlices(zlock.LockAction, &.{
@@ -881,9 +922,9 @@ test "with eviction, key01 is locking" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    s.putAndFinish(key01, 46);
-    s.putAndFinish(key02, 46);
-    s.putAndFinish(key03, 46);
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+    s.putAndFinish(key03, test_val_len);
 
     // clear lock actions
     s.locker.actions.clearRetainingCapacity();
@@ -891,7 +932,7 @@ test "with eviction, key01 is locking" {
     // key01 is locking
     s.locker.lock(s.locker.getSlot(hash1));
 
-    const setter4 = s.put(key04, 46).?;
+    const setter4 = s.put(key04, test_val_len).?;
 
     // check actions
     try std.testing.expectEqualSlices(zlock.LockAction, &.{
@@ -915,9 +956,9 @@ test "put => delete" {
 
     s.hash_func.putKeyHash(key02, hash1); // same hash as key01
 
-    s.putAndFinish(key01, 46);
-    s.putAndFinish(key02, 46);
-    s.putAndFinish(key03, 46);
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+    s.putAndFinish(key03, test_val_len);
     s.delete(key01);
 
     try s.expectItemKeysInSlab(SlabClass.init(1), &.{
@@ -934,7 +975,7 @@ test "put => get => delete => finish get" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    s.putAndFinish(key01, 46);
+    s.putAndFinish(key01, test_val_len);
     const getter1 = s.get(key01);
 
     s.delete(key01);
@@ -943,7 +984,6 @@ test "put => get => delete => finish get" {
     const it = getter1.Found.item;
     try expectEqual(1, it.refcount.refcount);
     try expectEqual(true, it.slab_flags.is_present);
-    try expectEqual(true, it.item_flags.is_deleting);
     try expectEqual(false, it.item_flags.set_partial);
 
     // check items
@@ -959,7 +999,6 @@ test "put => get => delete => finish get" {
     // check item
     try expectEqual(0, it.refcount.refcount);
     try expectEqual(false, it.slab_flags.is_present);
-    try expectEqual(true, it.item_flags.is_deleting);
     try expectEqual(false, it.item_flags.set_partial);
 }
 
@@ -967,7 +1006,7 @@ test "put => get => put finish" {
     const s = try ServiceTest.init(.{ .num_pages = 1 });
     defer s.deinit();
 
-    const setter1 = s.put(key01, 46).?;
+    const setter1 = s.put(key01, test_val_len).?;
 
     const getter1 = s.get(key01);
     try expectEqual(ItemGetter.SetPartial, std.meta.activeTag(getter1));
@@ -984,6 +1023,60 @@ test "put => get => put finish" {
     try s.expectItemKeysInSlab(SlabClass.init(1), &.{key01});
 
     s.finishPut(setter1);
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{});
+}
+
+test "put => try evict directly" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, test_val_len);
+
+    try expectEqual(true, s.tryEvictKey(key01));
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{});
+}
+
+test "get => try evict false" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, test_val_len);
+    const getter1 = s.get(key01);
+
+    try expectEqual(false, s.tryEvictKey(key01));
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{key01});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{key01});
+
+    s.finishGet(getter1.Found);
+}
+
+test "get => delete => try evict false" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, test_val_len);
+
+    const getter1 = s.get(key01);
+    const it = getter1.Found.item;
+
+    s.delete(key01); // do delete
+
+    // try to evict
+    try expectEqual(false, s.tryEvictKeyItem(it));
+
+    // check items
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(SlabClass.init(1), &.{key01});
+
+    s.finishGet(getter1.Found);
 
     // check items
     try s.expectItemKeysInBucket(hash1, &.{});

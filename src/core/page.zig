@@ -16,7 +16,7 @@ pub const PageNum = struct {
     }
 };
 
-pub const AtomicSlabNull= std.math.maxInt(u64);
+pub const AtomicSlabNull = std.math.maxInt(u64);
 
 pub const GlobalPager = struct {
     const Self = @This();
@@ -152,6 +152,7 @@ pub const GlobalPager = struct {
     ) void {
         std.debug.assertAligned(page, Item.Alignment);
         std.debug.assert(Item.Alignment.check(item_size));
+        std.debug.assert(item_size <= self.priv.page_size);
 
         const num_items = self.getNumItemsPerPage(item_size);
         var current_addr: [*]align(ItemAlignBytes) u8 = page.ptr;

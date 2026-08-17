@@ -49,6 +49,20 @@ pub const GlobalPager = struct {
         );
         std.debug.assertAligned(all_pages, Item.Alignment);
 
+        // fill all pages with random value
+        std.debug.assert(blk: {
+            const current_time = std.Io.Clock.real.now(io);
+            const seed: u64 = @intCast(current_time.toNanoseconds());
+
+            var prng = std.Random.DefaultPrng.init(seed);
+            const rand = prng.random();
+
+            for (all_pages) |*x| {
+                x.* = rand.int(u8);
+            }
+            break :blk true;
+        });
+
         // init page to slab array
         const pages_to_slab = try gpa.alloc(AtomicSlab, num_pages);
         for (pages_to_slab) |*x| {

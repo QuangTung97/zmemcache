@@ -20,13 +20,14 @@ const PageNum = zpage.PageNum;
 const String = []const u8;
 const NullItem = ?*Item;
 
-pub fn IService(T: type) type {
+pub fn ItemFuncs(T: type) type {
     return struct {
         put: fn (self: *T, key: String, value_len: usize) ?ItemSetter,
         finishPut: fn (self: *T, setter: ItemSetter) void,
         get: fn (self: *T, key: String) ItemGetter,
         finishGet: fn (self: *T, found: ItemFound) void,
         delete: fn (self: *T, key: String) void,
+        startMovePage: fn (self: *T, from_slab: SlabClass) ?PageNum,
     };
 }
 
@@ -243,6 +244,18 @@ pub fn ItemService(
             self.doDeleteItem(hash_value, it, pitem);
         }
 
+        pub fn startMovePage(self: *Self, from_slab: SlabClass) ?PageNum {
+            LruFuncs.lockSlab(self._lru, from_slab);
+            defer LruFuncs.unlockSlab(self._lru, from_slab);
+
+            const null_page_num = LruFuncs.popPage(self._lru, from_slab);
+            const page_num = if (null_page_num) |num| num else {
+                return null;
+            };
+
+            return page_num;
+        }
+
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
             if (null_item1) |it| {
@@ -276,6 +289,7 @@ pub fn ItemService(
                 self: *Self,
                 slab: SlabClass,
                 fn yield(ctx: *@This(), item: *Item) bool {
+                    item.slab_flags.is_present = false;
                     LruFuncs.putFreeItem(ctx.self._lru, ctx.slab, item);
                     return true;
                 }
@@ -538,6 +552,8 @@ const ServiceTest = struct {
     }
 
     fn deinit(self: *Self) void {
+        self.checkInvariant();
+
         self.svc.deinit();
         self.lru_svc.deinit();
         self.locker.deinit();
@@ -620,6 +636,10 @@ const ServiceTest = struct {
         return self.svc.tryToEvictItem(item, lock_slot);
     }
 
+    fn startMovePage(self: *Self, slab: SlabClass) PageNum {
+        return self.svc.startMovePage(slab).?;
+    }
+
     fn checkInvariant(self: *Self) void {
         const gpa = std.testing.allocator;
 
@@ -696,7 +716,15 @@ const ServiceTest = struct {
         // check total number of items
         const item_size = self.slab_conf.getItemSizeOfSlab(slab);
         const num_items_per_page = self.pager.getNumItemsPerPage(item_size);
-        std.debug.assert(num_pages * num_items_per_page == lru_ctx.total + total_free_items);
+
+        const total_is_equal = num_pages * num_items_per_page == lru_ctx.total + total_free_items;
+        if (!total_is_equal) {
+            std.debug.print("calculated: {}, real: {}\n", .{
+                num_pages * num_items_per_page,
+                lru_ctx.total + total_free_items,
+            });
+        }
+        std.debug.assert(total_is_equal);
     }
 
     fn checkItemInSlab(self: *Self, item: *Item, slab: SlabClass) void {
@@ -1091,4 +1119,16 @@ test "get => delete => try evict false" {
     // check items
     try s.expectItemKeysInBucket(hash1, &.{});
     try s.expectItemKeysInSlab(SlabClass.init(1), &.{});
+}
+
+test "start move page" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+
+    // TODO
+    // const slab1 = SlabClass.init(1);
+    // try expectEqual(PageNum.init(0), s.startMovePage(slab1));
 }

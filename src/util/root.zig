@@ -10,6 +10,12 @@ pub const Iterator = iter.Iterator;
 pub const ListHead = linked.ListHead;
 pub const WaitGroup = wait_group.WaitGroup;
 
+pub fn runtimeAssert(b: bool) void {
+    if (!b) {
+        @panic("assertion failed");
+    }
+}
+
 test {
     _ = .{
         ztest,

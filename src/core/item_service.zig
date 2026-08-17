@@ -79,8 +79,6 @@ pub fn NewItemFuncs(T: type) ItemFuncs(T) {
     };
 }
 
-// TODO validate hash table must bigger than item locks table
-
 const HashTable = struct {
     gpa: std.mem.Allocator,
     buckets: []NullItem,
@@ -167,6 +165,12 @@ pub fn ItemService(
             hash_size_log: u6,
         ) !Self {
             const hash_table = try HashTable.init(gpa, hash_size_log);
+            zutil.runtimeAssert(std.math.isPowerOfTwo(hash_table.buckets.len));
+
+            const lockTableSize = ItemLocks.getTableSize(locker).lock_slot;
+            zutil.runtimeAssert(std.math.isPowerOfTwo(lockTableSize));
+
+            zutil.runtimeAssert(lockTableSize <= hash_table.buckets.len);
 
             return .{
                 ._hasher = hasher,
@@ -708,7 +712,7 @@ const ServiceTest = struct {
             &s.pager,
             &s.locker,
             &s.lru_svc,
-            5,
+            5, // 32 buckets
         );
 
         s.move_items = ItemHashList.empty;

@@ -6,6 +6,7 @@ const LockSlot = types.LockSlot;
 
 pub fn ItemLockFuncs(T: type) type {
     return struct {
+        getTableSize: fn (self: *const T) LockSlot,
         getSlot: fn (self: *T, hash: HashValue) LockSlot,
         lock: fn (self: *T, slot: LockSlot) void,
         isLocked: fn (self: *T, slot: LockSlot) bool,
@@ -16,6 +17,7 @@ pub fn ItemLockFuncs(T: type) type {
 
 pub fn NewItemLockFuncs(T: type) ItemLockFuncs(T) {
     return .{
+        .getTableSize = T.getTableSize,
         .getSlot = T.getSlot,
         .lock = T.lock,
         .isLocked = T.isLocked,
@@ -59,6 +61,10 @@ pub const FakeItemLocks = struct {
     pub fn deinit(self: *Self) void {
         self.actions.deinit(self.gpa);
         self.lockedSet.deinit();
+    }
+
+    pub fn getTableSize(_: *const Self) LockSlot {
+        return LockSlot.init(16);
     }
 
     pub fn getSlot(_: *Self, hash: HashValue) LockSlot {
@@ -112,6 +118,7 @@ test "fake item locks" {
 
     const m = NewItemLockFuncs(FakeItemLocks);
     try expectEqual(LockSlot.init(81), m.getSlot(&obj, HashValue.init(81)));
+    try expectEqual(16, m.getTableSize(&obj).lock_slot);
 
     m.lock(&obj, LockSlot.init(11));
     m.lock(&obj, LockSlot.init(12));

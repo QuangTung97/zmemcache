@@ -43,9 +43,7 @@ pub const SlabClassConfig = struct {
     _all_classes: ClassList,
 
     pub fn init(gpa: Allocator, min_size: usize, max_size: usize, ratio: f64) !Self {
-        if (!Item.Alignment.check(max_size)) {
-            @panic("slab max size is not aligned");
-        }
+        zutil.runtimeAssert(Item.Alignment.check(max_size));
 
         var all_classes = ClassList.empty;
 
@@ -69,9 +67,7 @@ pub const SlabClassConfig = struct {
             try all_classes.append(gpa, max_size);
         }
 
-        if (all_classes.items.len >= SlabClass.MaxValue) {
-            @panic("too many slab classes");
-        }
+        zutil.runtimeAssert(all_classes.items.len < SlabClass.MaxValue);
 
         return .{
             ._gpa = gpa,

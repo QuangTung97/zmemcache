@@ -46,9 +46,7 @@ pub const Item = struct {
     value_len: u32, // constant
 
     hash_next: ?*Item, // protected by item lock
-
     lru_list: ListHead, // protected by slab lock
-
     cas_num: CasNum, // protected by item lock
 
     // key data & item data are protected by item lock

@@ -227,6 +227,7 @@ pub fn ItemService(
         pub fn finishPut(self: *Self, setter: ItemSetter) void {
             const slot = ItemLocks.getSlot(self._locker, setter.hash);
 
+            // lock item
             ItemLocks.lock(self._locker, slot);
             defer ItemLocks.unlock(self._locker, slot);
 
@@ -524,6 +525,8 @@ pub fn ItemService(
         }
 
         fn doDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item, pitem: *NullItem) void {
+            self.assertItemLocked(hash);
+
             // unlink from bucket
             const next = deleted_item.hash_next;
             pitem.* = next;
@@ -534,8 +537,8 @@ pub fn ItemService(
 
         fn decreaseRefcountAndDelete(self: *Self, hash: HashValue, deleted_item: *Item) void {
             self.assertItemLocked(hash);
-            deleted_item.refcount.refcount -= 1;
 
+            deleted_item.refcount.refcount -= 1;
             if (deleted_item.refcount.refcount > 0) {
                 return;
             }
@@ -874,6 +877,8 @@ const ServiceTest = struct {
             pub fn yield(ctx: *@This(), item: *Item) bool {
                 std.debug.assert(item.slab_flags.is_present);
                 std.debug.assert(item.slab.slab == ctx.slab.slab);
+                std.debug.assert(item.refcount.refcount > 0);
+
                 ctx.self.checkItemInSlab(item, ctx.slab);
 
                 const page_num = ctx.self.pager.getPageNumOfItem(item);
@@ -1396,4 +1401,32 @@ test "start move page, 2 pages, with delete" {
     const slab2 = SlabClass.init(2);
     s.addPageTo(slab2, move_page);
     try expectEqual(slab2, s.pager.getSlabClass(move_page));
+}
+
+test "move page, delete and delete move item" {
+    const s = try ServiceTest.init(.{ .num_pages = 2 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+    s.putAndFinish(key03, test_val_len);
+    s.putAndFinish(key04, test_val_len);
+
+    // do move
+    const move_page = PageNum.init(0);
+    try expectEqual(move_page, s.startMovePage(slab1));
+    try s.expectItemHashKeys(&.{ key03, key02, key01 }, s.move_items.items);
+    try s.expectItemKeysInSlab(slab1, &.{ key01, key02, key03, key04 });
+    try expectEqual(3, s.svc._mover_need_delete._counter.load(.seq_cst));
+
+    // delete
+    s.delete(key03);
+
+    // delete move item
+    s.deleteMoveItem(0);
+
+    try s.expectItemKeysInSlab(slab1, &.{ key01, key02, key04 });
+    try expectEqual(2, s.svc._mover_need_delete._counter.load(.seq_cst));
 }

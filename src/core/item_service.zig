@@ -7,6 +7,7 @@ const zpage = @import("page.zig");
 const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
+const CachePadding = types.CachePadding;
 const HashValue = types.HashValue;
 const Item = types.Item;
 const SlabClass = types.SlabClass;
@@ -103,11 +104,11 @@ const HashTable = struct {
         };
     }
 
-    fn deinit(self: *Self) void {
+    fn deinit(self: *const Self) void {
         self.gpa.free(self.buckets);
     }
 
-    fn getBucket(self: *Self, hash: HashValue) *NullItem {
+    fn getBucket(self: *const Self, hash: HashValue) *NullItem {
         const index = hash.hash & self.mask;
         return &self.buckets[index];
     }
@@ -143,9 +144,15 @@ pub fn ItemService(
         _pager: *zpage.GlobalPager,
         _locker: *L,
         _lru: *S,
-        _last_cas: std.atomic.Value(u64),
         _table: HashTable,
+
+        // -----------------------------------------------------
+        // Mutable Fields
+        // -----------------------------------------------------
+        _before_padding: CachePadding = undefined, // padding
         _mover_need_delete: zutil.WaitGroup,
+        _last_cas: std.atomic.Value(u64),
+        _after_padding: CachePadding = undefined, // padding
 
         const Self = @This();
 

@@ -4,6 +4,8 @@ const zutil = @import("zutil");
 const Allocator = std.mem.Allocator;
 const ListHead = zutil.ListHead;
 
+pub const CachePadding = [64]u8;
+
 pub const LruList = enum(u2) { Hot, Warm, Cold };
 
 pub const SlabFlags = packed struct {
@@ -47,7 +49,7 @@ pub const Item = struct {
 
     hash_next: ?*Item, // protected by item lock
     lru_list: ListHead, // protected by slab lock
-    cas_num: CasNum, // protected by item lock
+    cas_num: CasNum, // constant
 
     // key data & item data are protected by item lock
 
@@ -189,6 +191,10 @@ pub const FakeHashFunc = struct {
 // ===========================================================================
 
 const expectEqual = std.testing.expectEqual;
+
+test "cache padding" {
+    try expectEqual(64, @sizeOf(CachePadding));
+}
 
 test "check item size" {
     try expectEqual(1, @sizeOf(SlabFlags));

@@ -138,7 +138,7 @@ pub fn ItemService(
 ) type {
     return struct {
         _hasher: *H,
-        _slab_conf: *SlabClassConfig,
+        _slab_conf: *const SlabClassConfig,
         _pager: *zpage.GlobalPager,
         _locker: *L,
         _lru: *S,
@@ -154,17 +154,21 @@ pub fn ItemService(
 
         const Self = @This();
 
+        pub const Config = struct {
+            hash_size_log: u6,
+        };
+
         pub fn init(
             io: std.Io,
             gpa: std.mem.Allocator,
             hasher: *H,
-            slab_conf: *SlabClassConfig,
+            slab_conf: *const SlabClassConfig,
             pager: *zpage.GlobalPager,
             locker: *L,
             lru_svc: *S,
-            hash_size_log: u6,
+            conf: Config,
         ) !Self {
-            const hash_table = try HashTable.init(gpa, hash_size_log);
+            const hash_table = try HashTable.init(gpa, conf.hash_size_log);
             zutil.runtimeAssert(std.math.isPowerOfTwo(hash_table.buckets.len));
 
             const lockTableSize = ItemLocks.getTableSize(locker).lock_slot;
@@ -712,7 +716,9 @@ const ServiceTest = struct {
             &s.pager,
             &s.locker,
             &s.lru_svc,
-            5, // 32 buckets
+            .{
+                .hash_size_log = 5, // 32 buckets
+            },
         );
 
         s.move_items = ItemHashList.empty;

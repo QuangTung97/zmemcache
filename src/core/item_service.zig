@@ -59,6 +59,7 @@ pub fn ItemFuncs(T: type) type {
         ) ?PageNum,
         deleteMoveItem: fn (self: *T, item: ItemHash) void,
         removePageFrom: fn (self: *T, from_slab: SlabClass) void,
+        addPageTo: fn (self: *T, to_slab: SlabClass, page: PageNum) void,
     };
 }
 
@@ -73,6 +74,7 @@ pub fn NewItemFuncs(T: type) ItemFuncs(T) {
         .startMovePage = T.startMovePage,
         .deleteMoveItem = T.deleteMoveItem,
         .removePageFrom = T.removePageFrom,
+        .addPageTo = T.addPageTo,
     };
 }
 
@@ -368,6 +370,8 @@ pub fn ItemService(
             LruFuncs.lockSlab(self._lru, from_slab);
             defer LruFuncs.unlockSlab(self._lru, from_slab);
 
+            std.debug.assert(self._mover_need_delete._counter.load(.seq_cst) == 0);
+
             const page_num = LruFuncs.getMovingPage(self._lru, from_slab).?;
 
             // clear moving page
@@ -375,7 +379,18 @@ pub fn ItemService(
             self._pager.updatePageSlab(page_num, null);
         }
 
-        // TODO add finish move
+        pub fn addPageTo(self: *Self, to_slab: SlabClass, page_num: PageNum) void {
+            // lock the slab
+            LruFuncs.lockSlab(self._lru, to_slab);
+            defer LruFuncs.unlockSlab(self._lru, to_slab);
+
+            self._pager.updatePageSlab(page_num, to_slab);
+
+            // add free items of new page to this slab
+            const page = self._pager.getPageOfPageNum(page_num);
+            const item_size = self._slab_conf.getItemSizeOfSlab(to_slab);
+            self.addFreePageToSlab(to_slab, item_size, page);
+        }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
@@ -404,8 +419,19 @@ pub fn ItemService(
             const page = if (null_page) |p| p else {
                 return;
             };
-            const page_num = self._pager.getPageNumOfPage(page);
 
+            self.addFreePageToSlab(slab.slab_class, slab.item_size, page);
+        }
+
+        fn addFreePageToSlab(
+            self: *Self,
+            slab_class: SlabClass,
+            item_size: usize,
+            page: zpage.Page,
+        ) void {
+            self.assertSlabLocked(slab_class);
+
+            // iterate and add to free item list
             const IterateCtx = struct {
                 self: *Self,
                 slab: SlabClass,
@@ -417,17 +443,18 @@ pub fn ItemService(
             };
             var ctx = IterateCtx{
                 .self = self,
-                .slab = slab.slab_class,
+                .slab = slab_class,
             };
             self._pager.iterateItemsOfPage(
                 page,
-                slab.item_size,
+                item_size,
                 &ctx,
                 IterateCtx.yield,
             );
 
-            // page number to slab
-            LruFuncs.pushPage(self._lru, slab.slab_class, page_num);
+            // add page to slab
+            const page_num = self._pager.getPageNumOfPage(page);
+            LruFuncs.pushPage(self._lru, slab_class, page_num);
         }
 
         fn evictFromLru(self: *Self, slab: SlabClass, current_slot: LockSlot) void {
@@ -789,6 +816,11 @@ const ServiceTest = struct {
 
     fn removePageFrom(self: *Self, slab: SlabClass) void {
         self.svc.removePageFrom(slab);
+        self.checkInvariant();
+    }
+
+    fn addPageTo(self: *Self, slab: SlabClass, page_num: PageNum) void {
+        self.svc.addPageTo(slab, page_num);
         self.checkInvariant();
     }
 
@@ -1359,4 +1391,9 @@ test "start move page, 2 pages, with delete" {
     s.removePageFrom(slab1);
     try expectEqual(null, s.lru_svc.getMovingPage(slab1));
     try expectEqual(null, s.pager.getSlabClass(move_page));
+
+    // add to new slab
+    const slab2 = SlabClass.init(2);
+    s.addPageTo(slab2, move_page);
+    try expectEqual(slab2, s.pager.getSlabClass(move_page));
 }

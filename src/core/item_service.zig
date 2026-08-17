@@ -214,6 +214,14 @@ pub fn ItemService(
             LruFuncs.lockSlab(self._lru, slab);
             defer LruFuncs.unlockSlab(self._lru, slab);
 
+            // delete previous item
+            const prev_pitem = self.findItemPointerWithKey(hash_value, key);
+            const null_prev_item = prev_pitem.*;
+            if (null_prev_item) |prev_item| {
+                self.doDeleteItem(hash_value, prev_item, prev_pitem);
+            }
+
+            // try to get free item
             const null_item = self.getFreeItem(slab_size, lock_slot);
             const it = if (null_item) |x| x else {
                 // return if not found
@@ -413,6 +421,8 @@ pub fn ItemService(
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
+            self.assertSlabLocked(slab.slab_class);
+
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
             if (null_item1) |it| {
                 return it;
@@ -1511,4 +1521,21 @@ test "put with max evict attempt 3, not success" {
     const setter = s.put(key05, value_len);
     try expectEqual(null, setter);
     try s.expectItemKeysInSlab(slab2, &.{ key01, key02, key03, key04 });
+}
+
+test "put and then update value" {
+    const s = try ServiceTest.init(.{ .num_pages = 2 });
+    defer s.deinit();
+
+    const setter1 = s.put(key01, 4).?;
+    @memcpy(setter1.item.getValue(), "abcd");
+    s.finishPut(setter1);
+
+    const setter2 = s.put(key01, 5).?;
+    @memcpy(setter2.item.getValue(), "123xy");
+    s.finishPut(setter2);
+
+    const slab0 = SlabClass.init(0);
+    try s.expectItemKeysInBucket(hash1, &.{key01});
+    try s.expectItemKeysInSlab(slab0, &.{key01});
 }

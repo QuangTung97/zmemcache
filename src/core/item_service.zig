@@ -20,7 +20,12 @@ const PageNum = zpage.PageNum;
 const String = []const u8;
 const NullItem = ?*Item;
 
-const ItemList = std.ArrayList(*Item);
+pub const ItemHash = struct {
+    hash: HashValue,
+    item: *Item,
+};
+
+const ItemHashList = std.ArrayList(ItemHash);
 
 pub fn ItemFuncs(T: type) type {
     return struct {
@@ -33,8 +38,9 @@ pub fn ItemFuncs(T: type) type {
             self: *T,
             from_slab: SlabClass,
             gpa: Allocator,
-            delete_list: *ItemList,
+            delete_list: *ItemHashList,
         ) ?PageNum,
+        deleteMoveItem: fn(self: *T, slab: SlabClass, item: ItemHash) void,
     };
 }
 
@@ -46,6 +52,7 @@ pub fn NewItemFuncs(T: type) ItemFuncs(T) {
         .finishGet = T.finishGet,
         .delete = T.delete,
         .startMovePage = T.startMovePage,
+        .deleteMoveItem = T.deleteMoveItem,
     };
 }
 
@@ -262,7 +269,8 @@ pub fn ItemService(
             self.doDeleteItem(hash_value, it, pitem);
         }
 
-        pub fn startMovePage(self: *Self, from_slab: SlabClass, gpa: Allocator, delete_list: *ItemList) ?PageNum {
+        pub fn startMovePage(self: *Self, from_slab: SlabClass, gpa: Allocator, delete_list: *ItemHashList) ?PageNum {
+            // lock the slab
             LruFuncs.lockSlab(self._lru, from_slab);
             defer LruFuncs.unlockSlab(self._lru, from_slab);
 
@@ -277,10 +285,15 @@ pub fn ItemService(
             const IterateCtx = struct {
                 self: *Self,
                 gpa: Allocator,
-                delete_list: *ItemList,
+                delete_list: *ItemHashList,
                 fn yield(ctx: *@This(), item: *Item) bool {
                     if (item.slab_flags.is_present) {
-                        ctx.delete_list.append(ctx.gpa, item) catch unreachable;
+                        const hash_val = HashFunc.hashKey(ctx.self._hasher, item.getKey());
+                        const item_hash = ItemHash{
+                            .hash = hash_val,
+                            .item = item,
+                        };
+                        ctx.delete_list.append(ctx.gpa, item_hash) catch unreachable;
                     } else {
                         item.lru_list.remove(); // remove from free list
                     }
@@ -298,6 +311,10 @@ pub fn ItemService(
 
             LruFuncs.setMovingPage(self._lru, from_slab, page_num);
             return page_num;
+        }
+
+        pub fn deleteMoveItem(_: *Self, _: SlabClass, _: ItemHash) void {
+            // self.decreaseRefcountAndDelete(hash_value, deleted_item);
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
@@ -554,7 +571,7 @@ const ServiceTest = struct {
     lru_svc: zlru.FakeLruService,
     svc: ServiceType,
 
-    move_items: ItemList,
+    move_items: ItemHashList,
 
     const Config = struct {
         num_pages: u64 = 3,
@@ -588,7 +605,7 @@ const ServiceTest = struct {
             5,
         );
 
-        s.move_items = ItemList.empty;
+        s.move_items = ItemHashList.empty;
 
         // setup hash values
         s.hash_func.putKeyHash(key01, hash1);
@@ -860,12 +877,12 @@ const ServiceTest = struct {
         try zutil.expectStringSlicesEqual(expected_keys, actual_keys.items);
     }
 
-    fn expectItemKeys(self: *Self, expected_keys: []const String, items: []*Item) !void {
+    fn expectItemHashKeys(self: *Self, expected_keys: []const String, items: []ItemHash) !void {
         var item_keys = std.ArrayList(String).empty;
         defer item_keys.deinit(self.gpa);
 
         for (items) |it| {
-            try item_keys.append(self.gpa, it.getKey());
+            try item_keys.append(self.gpa, it.item.getKey());
         }
 
         try zutil.expectStringSlicesEqual(expected_keys, item_keys.items);
@@ -1212,7 +1229,7 @@ test "start move page" {
     s.putAndFinish(key02, test_val_len);
 
     try expectEqual(PageNum.init(0), s.startMovePage(slab1));
-    try s.expectItemKeys(&.{ key02, key01 }, s.move_items.items);
+    try s.expectItemHashKeys(&.{ key02, key01 }, s.move_items.items);
 }
 
 test "start move page, 2 pages, with delete" {
@@ -1229,7 +1246,7 @@ test "start move page, 2 pages, with delete" {
     s.delete(key02);
 
     try expectEqual(PageNum.init(0), s.startMovePage(slab1));
-    try s.expectItemKeys(&.{ key03, key01 }, s.move_items.items);
+    try s.expectItemHashKeys(&.{ key03, key01 }, s.move_items.items);
 }
 
 test "item funcs" {

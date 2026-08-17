@@ -29,6 +29,9 @@ pub fn LruFuncs(T: type) type {
 
         pushPage: fn (self: *T, slab: Slab, page: PageNum) void,
         popPage: fn (self: *T, slab: Slab) ?PageNum,
+
+        setMovingPage: fn (self: *T, slab: Slab, page_num: PageNum) void,
+        getMovingPage: fn (self: *T, slab: Slab) ?PageNum,
     };
 }
 
@@ -48,6 +51,9 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
 
         .pushPage = T.pushPage,
         .popPage = T.popPage,
+
+        .setMovingPage =  T.setMovingPage,
+        .getMovingPage =  T.getMovingPage,
     };
 }
 
@@ -61,6 +67,7 @@ pub const FakeLruService = struct {
     const SlabMap = std.AutoHashMap(Slab, *ListHead);
     const PageQueue = std.Deque(PageNum);
     const PageQueueMap = std.AutoHashMap(Slab, *PageQueue);
+    const MovingPageMap = std.AutoHashMap(Slab, PageNum);
 
     pub const TouchItem = struct {
         slab: Slab,
@@ -77,6 +84,7 @@ pub const FakeLruService = struct {
     free_map: SlabMap,
     page_queue_map: PageQueueMap,
     touch_list: TouchList,
+    moving_page_map: MovingPageMap,
 
     pub fn init(gpa: Allocator) Self {
         const locked_set = LockedSetType.init(gpa);
@@ -84,6 +92,7 @@ pub const FakeLruService = struct {
         const free_map = SlabMap.init(gpa);
         const page_queue_map = PageQueueMap.init(gpa);
         const touch_list = TouchList.empty;
+        const moving_page_map = MovingPageMap.init(gpa);
 
         return .{
             .gpa = gpa,
@@ -92,6 +101,7 @@ pub const FakeLruService = struct {
             .free_map = free_map,
             .page_queue_map = page_queue_map,
             .touch_list = touch_list,
+            .moving_page_map = moving_page_map,
         };
     }
 
@@ -215,6 +225,14 @@ pub const FakeLruService = struct {
         self.page_queue_map.put(slab, queue) catch unreachable;
 
         return queue;
+    }
+
+    pub fn setMovingPage(self: *Self, slab: Slab, page_num: PageNum) void {
+        self.moving_page_map.put(slab, page_num) catch unreachable;
+    }
+
+    pub fn getMovingPage(self: *Self, slab: Slab) ?PageNum {
+        return self.moving_page_map.get(slab);
     }
 };
 

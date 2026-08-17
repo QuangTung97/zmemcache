@@ -253,6 +253,7 @@ pub fn ItemService(
                 return null;
             };
 
+            LruFuncs.setMovingPage(self._lru, from_slab, page_num);
             return page_num;
         }
 
@@ -637,7 +638,9 @@ const ServiceTest = struct {
     }
 
     fn startMovePage(self: *Self, slab: SlabClass) PageNum {
-        return self.svc.startMovePage(slab).?;
+        const num = self.svc.startMovePage(slab).?;
+        self.checkInvariant();
+        return num;
     }
 
     fn checkInvariant(self: *Self) void {
@@ -672,7 +675,8 @@ const ServiceTest = struct {
             const null_slab = self.pager.getSlabClass(page_num);
             if (null_slab) |slab| {
                 std.debug.assert(inuse_pages.contains(page_num));
-                std.debug.assert(slab_page_map.get(slab).?.page_num == page_num.page_num);
+                const slab_page = slab_page_map.get(slab);
+                std.debug.assert(page_num.nullEqual(slab_page));
             } else {
                 std.debug.assert(!inuse_pages.contains(page_num));
             }
@@ -706,10 +710,15 @@ const ServiceTest = struct {
         if (null_free_list) |free_list| {
             var it = free_list.iterate();
             while (it.next()) |n| {
-                total_free_items += 1;
                 const item = Item.fromList(n);
                 std.debug.assert(!item.slab_flags.is_present);
                 self.checkItemInSlab(item, slab);
+
+                const page_num = self.pager.getPageNumOfItem(item);
+                const moving_page = self.lru_svc.getMovingPage(slab);
+                if (!page_num.nullEqual(moving_page)) {
+                    total_free_items += 1;
+                }
             }
         }
 
@@ -719,9 +728,10 @@ const ServiceTest = struct {
 
         const total_is_equal = num_pages * num_items_per_page == lru_ctx.total + total_free_items;
         if (!total_is_equal) {
-            std.debug.print("calculated: {}, real: {}\n", .{
+            std.debug.print("calculated: {}, real: {}, num_free: {}\n", .{
                 num_pages * num_items_per_page,
                 lru_ctx.total + total_free_items,
+                total_free_items,
             });
         }
         std.debug.assert(total_is_equal);
@@ -1122,13 +1132,15 @@ test "get => delete => try evict false" {
 }
 
 test "start move page" {
-    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    const s = try ServiceTest.init(.{ .num_pages = 2 });
     defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
 
     s.putAndFinish(key01, test_val_len);
     s.putAndFinish(key02, test_val_len);
+    s.putAndFinish(key03, test_val_len);
+    s.putAndFinish(key04, test_val_len);
 
-    // TODO
-    // const slab1 = SlabClass.init(1);
-    // try expectEqual(PageNum.init(0), s.startMovePage(slab1));
+    try expectEqual(PageNum.init(0), s.startMovePage(slab1));
 }

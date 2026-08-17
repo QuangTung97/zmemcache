@@ -11,8 +11,19 @@ pub const Page = []align(ItemAlignBytes) u8;
 
 pub const PageNum = struct {
     page_num: u64,
-    pub fn init(x: u64) @This() {
+
+    const Self =@This();
+
+
+    pub fn init(x: u64) Self {
         return .{ .page_num = x };
+    }
+
+    pub fn nullEqual(self: Self, other: ?Self) bool{
+        const other_val= if (other) |v| v else {
+            return false;
+        };
+        return self.page_num == other_val.page_num;
     }
 };
 

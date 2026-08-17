@@ -20,6 +20,16 @@ const PageNum = zpage.PageNum;
 const String = []const u8;
 const NullItem = ?*Item;
 
+pub fn IService(T: type) type {
+    return struct {
+        put: fn (self: *T, key: String, value_len: usize) ?ItemSetter,
+        finishPut: fn (self: *T, setter: ItemSetter) void,
+        get: fn (self: *T, key: String) ItemGetter,
+        finishGet: fn (self: *T, found: ItemFound) void,
+        delete: fn (self: *T, key: String) void,
+    };
+}
+
 // TODO validate hash table must bigger than item locks table
 
 const HashTable = struct {

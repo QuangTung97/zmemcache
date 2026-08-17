@@ -143,6 +143,7 @@ pub fn ItemService(
         _locker: *L,
         _lru: *S,
         _table: HashTable,
+        _max_evict_attempts: usize,
 
         // -----------------------------------------------------
         // Mutable Fields
@@ -156,6 +157,7 @@ pub fn ItemService(
 
         pub const Config = struct {
             hash_size_log: u6,
+            max_evict_attempts: usize = 5,
         };
 
         pub fn init(
@@ -183,6 +185,8 @@ pub fn ItemService(
                 ._locker = locker,
                 ._lru = lru_svc,
                 ._table = hash_table,
+                ._max_evict_attempts = conf.max_evict_attempts,
+
                 ._last_cas = .init(0),
                 ._mover_need_delete = zutil.WaitGroup.init(io),
             };
@@ -479,17 +483,23 @@ pub fn ItemService(
             var ctx = struct {
                 self: *Self,
                 current_slot: LockSlot,
+                num_attempts: usize,
                 pub fn yield(ctx: *@This(), item: *Item) bool {
-                    // TODO limit number of attempts
                     const ok = ctx.self.tryToEvictItem(
                         item,
                         ctx.current_slot,
                     );
-                    return !ok;
+                    if (ok) {
+                        return false;
+                    }
+
+                    ctx.num_attempts += 1;
+                    return ctx.num_attempts < ctx.self._max_evict_attempts;
                 }
             }{
                 .self = self,
                 .current_slot = current_slot,
+                .num_attempts = 0,
             };
 
             // iterate through lru list
@@ -498,6 +508,8 @@ pub fn ItemService(
                 slab,
                 ItemIter.init(&ctx),
             );
+
+            std.debug.assert(ctx.num_attempts <= self._max_evict_attempts);
         }
 
         fn tryToEvictItem(self: *Self, evicted_item: *Item, current_slot: LockSlot) bool {
@@ -658,6 +670,9 @@ const hash3 = HashValue.init(23);
 const key04 = "key04";
 const hash4 = HashValue.init(24);
 
+const key05 = "key05";
+const hash5 = HashValue.init(25);
+
 const TouchItem = zlru.FakeLruService.TouchItem;
 
 const ServiceTest = struct {
@@ -688,6 +703,7 @@ const ServiceTest = struct {
 
     const Config = struct {
         num_pages: u64 = 3,
+        max_evict_attempts: usize = 5,
     };
 
     fn init(conf: Config) !*Self {
@@ -718,6 +734,7 @@ const ServiceTest = struct {
             &s.lru_svc,
             .{
                 .hash_size_log = 5, // 32 buckets
+                .max_evict_attempts = conf.max_evict_attempts,
             },
         );
 
@@ -728,6 +745,7 @@ const ServiceTest = struct {
         s.hash_func.putKeyHash(key02, hash2);
         s.hash_func.putKeyHash(key03, hash3);
         s.hash_func.putKeyHash(key04, hash4);
+        s.hash_func.putKeyHash(key05, hash5);
 
         return s;
     }
@@ -808,9 +826,11 @@ const ServiceTest = struct {
         const hash_value = HashFunc.hashKey(self.svc._hasher, item.getKey());
         const lock_slot = ItemLocks.getSlot(self.svc._locker, hash_value);
 
+        // lock item
         ItemLocks.lock(self.svc._locker, lock_slot);
         defer ItemLocks.unlock(self.svc._locker, lock_slot);
 
+        // lock slab
         const slab = item.slab;
         LruFuncs.lockSlab(self.svc._lru, slab);
         defer LruFuncs.unlockSlab(self.svc._lru, slab);
@@ -1446,4 +1466,49 @@ test "move page, delete and delete move item" {
 
     try s.expectItemKeysInSlab(slab1, &.{ key01, key02, key04 });
     try expectEqual(2, s.svc._mover_need_delete._counter.load(.seq_cst));
+}
+
+test "put with max evict attempt 3, evict ok" {
+    const s = try ServiceTest.init(.{ .num_pages = 2, .max_evict_attempts = 3 });
+    defer s.deinit();
+
+    const value_len = 210 - key01.len - Item.Size;
+
+    s.putAndFinish(key01, value_len);
+    s.putAndFinish(key02, value_len);
+    s.putAndFinish(key03, value_len);
+    s.putAndFinish(key04, value_len);
+
+    const slab2 = SlabClass.init(2);
+    try s.expectItemKeysInSlab(slab2, &.{ key01, key02, key03, key04 });
+
+    _ = s.get(key01);
+    _ = s.get(key02);
+
+    s.putAndFinish(key05, value_len);
+    try s.expectItemKeysInSlab(slab2, &.{ key01, key02, key04, key05 });
+}
+
+test "put with max evict attempt 3, not success" {
+    const s = try ServiceTest.init(.{ .num_pages = 2, .max_evict_attempts = 3 });
+    defer s.deinit();
+
+    const value_len = 210 - key01.len - Item.Size;
+
+    s.putAndFinish(key01, value_len);
+    s.putAndFinish(key02, value_len);
+    s.putAndFinish(key03, value_len);
+    s.putAndFinish(key04, value_len);
+
+    const slab2 = SlabClass.init(2);
+    try s.expectItemKeysInSlab(slab2, &.{ key01, key02, key03, key04 });
+
+    _ = s.get(key01);
+    _ = s.get(key02);
+    _ = s.get(key03);
+
+    // put fail
+    const setter = s.put(key05, value_len);
+    try expectEqual(null, setter);
+    try s.expectItemKeysInSlab(slab2, &.{ key01, key02, key03, key04 });
 }

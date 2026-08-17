@@ -21,15 +21,15 @@ const String = []const u8;
 const NullItem = ?*Item;
 
 const ItemOpaquePtr = struct {
-    item: *anyopaque,
-
     const Self = @This();
+    item: *anyopaque,
 
     fn init(item: *Item) Self {
         return .{
             .item = item,
         };
     }
+
     fn equal(self: Self, other: *Item) bool {
         const other_ptr: *anyopaque = other;
         return self.item == other_ptr;
@@ -58,6 +58,7 @@ pub fn ItemFuncs(T: type) type {
             delete_list: *ItemHashList,
         ) ?PageNum,
         deleteMoveItem: fn (self: *T, item: ItemHash) void,
+        removePageFrom: fn (self: *T, from_slab: SlabClass) void,
     };
 }
 
@@ -71,6 +72,7 @@ pub fn NewItemFuncs(T: type) ItemFuncs(T) {
 
         .startMovePage = T.startMovePage,
         .deleteMoveItem = T.deleteMoveItem,
+        .removePageFrom = T.removePageFrom,
     };
 }
 
@@ -356,6 +358,21 @@ pub fn ItemService(
 
             std.debug.assert(item.slab_flags.is_present);
             self.doDeleteItem(hash_value, item, pitem);
+        }
+
+        pub fn removePageFrom(self: *Self, from_slab: SlabClass) void {
+            // wait for zero deleting items
+            self._mover_need_delete.wait();
+
+            // lock the slab
+            LruFuncs.lockSlab(self._lru, from_slab);
+            defer LruFuncs.unlockSlab(self._lru, from_slab);
+
+            const page_num = LruFuncs.getMovingPage(self._lru, from_slab).?;
+
+            // clear moving page
+            LruFuncs.setMovingPage(self._lru, from_slab, null);
+            self._pager.updatePageSlab(page_num, null);
         }
 
         // TODO add finish move
@@ -767,6 +784,11 @@ const ServiceTest = struct {
 
     fn deleteMoveItem(self: *Self, index: usize) void {
         self.svc.deleteMoveItem(self.move_items.items[index]);
+        self.checkInvariant();
+    }
+
+    fn removePageFrom(self: *Self, slab: SlabClass) void {
+        self.svc.removePageFrom(slab);
         self.checkInvariant();
     }
 
@@ -1313,7 +1335,8 @@ test "start move page, 2 pages, with delete" {
     s.delete(key02);
 
     // do move
-    try expectEqual(PageNum.init(0), s.startMovePage(slab1));
+    const move_page = PageNum.init(0);
+    try expectEqual(move_page, s.startMovePage(slab1));
     try s.expectItemHashKeys(&.{ key03, key01 }, s.move_items.items);
     try s.expectItemKeysInSlab(slab1, &.{ key01, key03, key04 });
     try expectEqual(2, s.svc._mover_need_delete._counter.load(.seq_cst));
@@ -1331,4 +1354,9 @@ test "start move page, 2 pages, with delete" {
     try s.expectItemKeysInBucket(hash1, &.{});
     try s.expectItemKeysInSlab(slab1, &.{key04});
     try expectEqual(0, s.svc._mover_need_delete._counter.load(.seq_cst));
+
+    // remove from source slab
+    s.removePageFrom(slab1);
+    try expectEqual(null, s.lru_svc.getMovingPage(slab1));
+    try expectEqual(null, s.pager.getSlabClass(move_page));
 }

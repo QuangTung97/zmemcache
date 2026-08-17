@@ -149,11 +149,15 @@ pub const GlobalPager = struct {
         return @alignCast(self.priv.all_pages[start_offset..end_offset]);
     }
 
-    pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: types.SlabClass) void {
+    pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: ?types.SlabClass) void {
         const this = &self.priv;
         const num_pages = this.pages_to_slab.len;
         std.debug.assert(page_num.page_num < num_pages);
-        this.pages_to_slab[page_num.page_num].store(slab.slab, .seq_cst);
+        if (slab) |s| {
+            this.pages_to_slab[page_num.page_num].store(s.slab, .seq_cst);
+        } else {
+            this.pages_to_slab[page_num.page_num].store(AtomicSlabNull, .seq_cst);
+        }
     }
 
     pub fn getSlabClass(self: *const Self, page_num: PageNum) ?types.SlabClass {

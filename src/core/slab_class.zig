@@ -67,7 +67,8 @@ pub const SlabClassConfig = struct {
             try all_classes.append(gpa, max_size);
         }
 
-        zutil.runtimeAssert(all_classes.items.len < SlabClass.MaxValue);
+        zutil.runtimeAssert(SlabClass.MaxNumClass <= SlabClass.MaxIntValue);
+        zutil.runtimeAssert(all_classes.items.len <= SlabClass.MaxNumClass);
 
         return .{
             ._gpa = gpa,
@@ -82,7 +83,7 @@ pub const SlabClassConfig = struct {
     pub fn getSlabFromItemSize(self: *const Self, item_size: usize) SlabSize {
         const index = self.lowerBound(item_size);
 
-        std.debug.assert(index <= SlabClass.MaxValue);
+        std.debug.assert(index <= SlabClass.MaxNumClass);
         const slab: SlabClass.IntType = @intCast(index);
 
         return .init(slab, self._all_classes.items[index]);
@@ -97,12 +98,12 @@ pub const SlabClassConfig = struct {
     }
 
     fn lowerBound(self: *const Self, key: usize) usize {
-        return std.sort.lowerBound(
-            usize,
-            self._all_classes.items,
-            key,
-            compareFunc,
-        );
+        for (self._all_classes.items, 0..) |item_size, index| {
+            if (item_size >= key) {
+                return index;
+            }
+        }
+        @panic("item size is too big");
     }
 
     pub fn getAllSlabClasses(self: *const Self) SlabSizeIter {
@@ -153,6 +154,15 @@ test "normal" {
         SlabSize.init(5, 736),
         SlabSize.init(6, 1024),
     }, conf.getAllSlabClasses());
+
+    // test lower bound
+    try expectEqual(0, conf.lowerBound(95));
+    try expectEqual(0, conf.lowerBound(96));
+    try expectEqual(1, conf.lowerBound(97));
+
+    try expectEqual(3, conf.lowerBound(327));
+    try expectEqual(3, conf.lowerBound(328));
+    try expectEqual(4, conf.lowerBound(329));
 }
 
 test "max size is included" {

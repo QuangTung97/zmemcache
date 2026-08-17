@@ -166,7 +166,7 @@ pub const GlobalPager = struct {
             return null;
         }
 
-        std.debug.assert(slab_num <= SlabClass.MaxValue);
+        std.debug.assert(slab_num <= SlabClass.MaxNumClass);
         return .{
             .slab = @intCast(slab_num),
         };

@@ -127,7 +127,9 @@ pub const LockSlot = struct {
 
 pub const SlabClass = struct {
     pub const IntType = u8;
-    pub const MaxValue = std.math.maxInt(IntType);
+    pub const MaxIntValue = std.math.maxInt(IntType);
+    pub const MaxNumClass = 64;
+
     const Self = @This();
 
     slab: IntType,
@@ -211,7 +213,8 @@ test "check item size" {
 }
 
 test "slab class" {
-    try expectEqual(255, SlabClass.MaxValue);
+    try expectEqual(255, SlabClass.MaxIntValue);
+    try expectEqual(64, SlabClass.MaxNumClass);
 }
 
 test "item getter" {

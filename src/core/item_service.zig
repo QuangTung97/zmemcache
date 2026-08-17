@@ -29,7 +29,23 @@ pub fn ItemFuncs(T: type) type {
         get: fn (self: *T, key: String) ItemGetter,
         finishGet: fn (self: *T, found: ItemFound) void,
         delete: fn (self: *T, key: String) void,
-        startMovePage: fn (self: *T, from_slab: SlabClass) ?PageNum,
+        startMovePage: fn (
+            self: *T,
+            from_slab: SlabClass,
+            gpa: Allocator,
+            delete_list: *ItemList,
+        ) ?PageNum,
+    };
+}
+
+pub fn NewItemFuncs(T: type) ItemFuncs(T) {
+    return .{
+        .put = T.put,
+        .finishPut = T.finishPut,
+        .get = T.get,
+        .finishGet = T.finishGet,
+        .delete = T.delete,
+        .startMovePage = T.startMovePage,
     };
 }
 
@@ -1214,4 +1230,11 @@ test "start move page, 2 pages, with delete" {
 
     try expectEqual(PageNum.init(0), s.startMovePage(slab1));
     try s.expectItemKeys(&.{ key03, key01 }, s.move_items.items);
+}
+
+test "item funcs" {
+    const s = try ServiceTest.init(.{});
+    defer s.deinit();
+
+    _ = NewItemFuncs(@TypeOf(s.svc));
 }

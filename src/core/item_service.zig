@@ -34,13 +34,14 @@ pub fn ItemFuncs(T: type) type {
         get: fn (self: *T, key: String) ItemGetter,
         finishGet: fn (self: *T, found: ItemFound) void,
         delete: fn (self: *T, key: String) void,
+
         startMovePage: fn (
             self: *T,
             from_slab: SlabClass,
             gpa: Allocator,
             delete_list: *ItemHashList,
         ) ?PageNum,
-        deleteMoveItem: fn(self: *T, slab: SlabClass, item: ItemHash) void,
+        deleteMoveItem: fn (self: *T, item: ItemHash) void,
     };
 }
 
@@ -51,6 +52,7 @@ pub fn NewItemFuncs(T: type) ItemFuncs(T) {
         .get = T.get,
         .finishGet = T.finishGet,
         .delete = T.delete,
+
         .startMovePage = T.startMovePage,
         .deleteMoveItem = T.deleteMoveItem,
     };
@@ -122,12 +124,13 @@ pub fn ItemService(
         _locker: *L,
         _lru: *S,
         _last_cas: std.atomic.Value(u64),
-
         _table: HashTable,
+        _mover_need_delete: zutil.WaitGroup,
 
         const Self = @This();
 
         pub fn init(
+            io: std.Io,
             gpa: std.mem.Allocator,
             hasher: *H,
             slab_conf: *SlabClassConfig,
@@ -146,6 +149,7 @@ pub fn ItemService(
                 ._lru = lru_svc,
                 ._table = hash_table,
                 ._last_cas = .init(0),
+                ._mover_need_delete = zutil.WaitGroup.init(io),
             };
         }
 
@@ -282,6 +286,9 @@ pub fn ItemService(
             const item_size = self._slab_conf.getItemSizeOfSlab(from_slab);
             const moving_page = self._pager.getPageOfPageNum(page_num);
 
+            // clear delete_list
+            delete_list.clearRetainingCapacity();
+
             const IterateCtx = struct {
                 self: *Self,
                 gpa: Allocator,
@@ -310,11 +317,28 @@ pub fn ItemService(
             self._pager.iterateItemsOfPage(moving_page, item_size, &ctx, IterateCtx.yield);
 
             LruFuncs.setMovingPage(self._lru, from_slab, page_num);
+
+            const num_delete: u64 = delete_list.items.len;
+            self._mover_need_delete.add(num_delete);
+
             return page_num;
         }
 
-        pub fn deleteMoveItem(_: *Self, _: SlabClass, _: ItemHash) void {
-            // self.decreaseRefcountAndDelete(hash_value, deleted_item);
+        pub fn deleteMoveItem(self: *Self, item_hash: ItemHash) void {
+            const hash_value = item_hash.hash;
+            const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
+
+            // lock the item
+            ItemLocks.lock(self._locker, lock_slot);
+            defer ItemLocks.unlock(self._locker, lock_slot);
+
+            const pitem = self.findItemPointerInBucket(hash_value, item_hash.item);
+            const null_item = pitem.*;
+            const item = if (null_item) |p| p else {
+                return;
+            };
+
+            self.doDeleteItem(hash_value, item, pitem);
         }
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
@@ -473,7 +497,15 @@ pub fn ItemService(
             deleted_item.slab_flags.is_present = false;
 
             LruFuncs.deleteItem(self._lru, slab, deleted_item);
-            LruFuncs.putFreeItem(self._lru, slab, deleted_item);
+
+            const page_num = self._pager.getPageNumOfItem(deleted_item);
+            const move_page = LruFuncs.getMovingPage(self._lru, slab);
+
+            if (page_num.nullEqual(move_page)) {
+                self._mover_need_delete.done();
+            } else {
+                LruFuncs.putFreeItem(self._lru, slab, deleted_item);
+            }
         }
 
         fn findItemPointerInBucket(self: *Self, hash: HashValue, find_item: *Item) *NullItem {
@@ -596,6 +628,7 @@ const ServiceTest = struct {
         s.lru_svc = zlru.FakeLruService.init(gpa);
 
         s.svc = try ServiceType.init(
+            io,
             gpa,
             &s.hash_func,
             &s.slab_conf,
@@ -713,6 +746,11 @@ const ServiceTest = struct {
         return num;
     }
 
+    fn deleteMoveItem(self: *Self, index: usize) void {
+        self.svc.deleteMoveItem(self.move_items.items[index]);
+        self.checkInvariant();
+    }
+
     fn checkInvariant(self: *Self) void {
         const gpa = std.testing.allocator;
 
@@ -794,6 +832,8 @@ const ServiceTest = struct {
 
                 const page_num = self.pager.getPageNumOfItem(item);
                 const moving_page = self.lru_svc.getMovingPage(slab);
+
+                // free item must not in moving page
                 std.debug.assert(!page_num.nullEqual(moving_page));
                 total_free_items += 1;
             }
@@ -900,6 +940,13 @@ const ServiceTest = struct {
 };
 
 const test_val_len = 98 - key01.len - Item.Size;
+
+test "item funcs" {
+    const s = try ServiceTest.init(.{});
+    defer s.deinit();
+
+    _ = NewItemFuncs(@TypeOf(s.svc));
+}
 
 test "put then finish" {
     try expectEqual(45, test_val_len);
@@ -1245,13 +1292,23 @@ test "start move page, 2 pages, with delete" {
 
     s.delete(key02);
 
+    // do move
     try expectEqual(PageNum.init(0), s.startMovePage(slab1));
     try s.expectItemHashKeys(&.{ key03, key01 }, s.move_items.items);
-}
+    try s.expectItemKeysInSlab(slab1, &.{ key01, key03, key04 });
+    try expectEqual(2, s.svc._mover_need_delete._counter.load(.seq_cst));
 
-test "item funcs" {
-    const s = try ServiceTest.init(.{});
-    defer s.deinit();
+    // delete mover key03
+    s.deleteMoveItem(0);
 
-    _ = NewItemFuncs(@TypeOf(s.svc));
+    try s.expectItemKeysInBucket(hash3, &.{});
+    try s.expectItemKeysInSlab(slab1, &.{ key01, key04 });
+    try expectEqual(1, s.svc._mover_need_delete._counter.load(.seq_cst));
+
+    // delete mover key01
+    s.deleteMoveItem(1);
+
+    try s.expectItemKeysInBucket(hash1, &.{});
+    try s.expectItemKeysInSlab(slab1, &.{key04});
+    try expectEqual(0, s.svc._mover_need_delete._counter.load(.seq_cst));
 }

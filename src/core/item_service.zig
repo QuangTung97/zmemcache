@@ -20,6 +20,8 @@ const PageNum = zpage.PageNum;
 const String = []const u8;
 const NullItem = ?*Item;
 
+const ItemList = std.ArrayList(*Item);
+
 pub fn ItemFuncs(T: type) type {
     return struct {
         put: fn (self: *T, key: String, value_len: usize) ?ItemSetter,
@@ -244,7 +246,7 @@ pub fn ItemService(
             self.doDeleteItem(hash_value, it, pitem);
         }
 
-        pub fn startMovePage(self: *Self, from_slab: SlabClass) ?PageNum {
+        pub fn startMovePage(self: *Self, from_slab: SlabClass, gpa: Allocator, delete_list: *ItemList) ?PageNum {
             LruFuncs.lockSlab(self._lru, from_slab);
             defer LruFuncs.unlockSlab(self._lru, from_slab);
 
@@ -252,6 +254,31 @@ pub fn ItemService(
             const page_num = if (null_page_num) |num| num else {
                 return null;
             };
+
+            const item_size = self._slab_conf.getItemSizeOfSlab(from_slab);
+            const moving_page = self._pager.getPageOfPageNum(page_num);
+
+            const IterateCtx = struct {
+                self: *Self,
+                gpa: Allocator,
+                delete_list: *ItemList,
+                fn yield(ctx: *@This(), item: *Item) bool {
+                    if (item.slab_flags.is_present) {
+                        ctx.delete_list.append(ctx.gpa, item) catch unreachable;
+                    } else {
+                        item.lru_list.remove(); // remove from free list
+                    }
+                    return true;
+                }
+            };
+            var ctx = IterateCtx{
+                .self = self,
+                .gpa = gpa,
+                .delete_list = delete_list,
+            };
+
+            // iterate through items of moving page
+            self._pager.iterateItemsOfPage(moving_page, item_size, &ctx, IterateCtx.yield);
 
             LruFuncs.setMovingPage(self._lru, from_slab, page_num);
             return page_num;
@@ -511,6 +538,8 @@ const ServiceTest = struct {
     lru_svc: zlru.FakeLruService,
     svc: ServiceType,
 
+    move_items: ItemList,
+
     const Config = struct {
         num_pages: u64 = 3,
     };
@@ -543,6 +572,8 @@ const ServiceTest = struct {
             5,
         );
 
+        s.move_items = ItemList.empty;
+
         // setup hash values
         s.hash_func.putKeyHash(key01, hash1);
         s.hash_func.putKeyHash(key02, hash2);
@@ -555,6 +586,7 @@ const ServiceTest = struct {
     fn deinit(self: *Self) void {
         self.checkInvariant();
 
+        self.move_items.deinit(self.gpa);
         self.svc.deinit();
         self.lru_svc.deinit();
         self.locker.deinit();
@@ -638,7 +670,12 @@ const ServiceTest = struct {
     }
 
     fn startMovePage(self: *Self, slab: SlabClass) PageNum {
-        const num = self.svc.startMovePage(slab).?;
+        self.move_items.clearRetainingCapacity();
+        const num = self.svc.startMovePage(
+            slab,
+            self.gpa,
+            &self.move_items,
+        ).?;
         self.checkInvariant();
         return num;
     }
@@ -717,14 +754,15 @@ const ServiceTest = struct {
             var it = free_list.iterate();
             while (it.next()) |n| {
                 const item = Item.fromList(n);
+
+                // validate not present
                 std.debug.assert(!item.slab_flags.is_present);
                 self.checkItemInSlab(item, slab);
 
                 const page_num = self.pager.getPageNumOfItem(item);
                 const moving_page = self.lru_svc.getMovingPage(slab);
-                if (!page_num.nullEqual(moving_page)) {
-                    total_free_items += 1;
-                }
+                std.debug.assert(!page_num.nullEqual(moving_page));
+                total_free_items += 1;
             }
         }
 
@@ -804,6 +842,17 @@ const ServiceTest = struct {
         }
 
         try zutil.expectStringSlicesEqual(expected_keys, actual_keys.items);
+    }
+
+    fn expectItemKeys(self: *Self, expected_keys: []const String, items: []*Item) !void {
+        var item_keys = std.ArrayList(String).empty;
+        defer item_keys.deinit(self.gpa);
+
+        for (items) |it| {
+            try item_keys.append(self.gpa, it.getKey());
+        }
+
+        try zutil.expectStringSlicesEqual(expected_keys, item_keys.items);
     }
 
     fn expectTouchList(self: *Self, expected: []const TouchItem) !void {
@@ -1138,6 +1187,19 @@ test "get => delete => try evict false" {
 }
 
 test "start move page" {
+    const s = try ServiceTest.init(.{ .num_pages = 1 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    s.putAndFinish(key01, test_val_len);
+    s.putAndFinish(key02, test_val_len);
+
+    try expectEqual(PageNum.init(0), s.startMovePage(slab1));
+    try s.expectItemKeys(&.{ key02, key01 }, s.move_items.items);
+}
+
+test "start move page, 2 pages, with delete" {
     const s = try ServiceTest.init(.{ .num_pages = 2 });
     defer s.deinit();
 
@@ -1148,5 +1210,8 @@ test "start move page" {
     s.putAndFinish(key03, test_val_len);
     s.putAndFinish(key04, test_val_len);
 
+    s.delete(key02);
+
     try expectEqual(PageNum.init(0), s.startMovePage(slab1));
+    try s.expectItemKeys(&.{ key03, key01 }, s.move_items.items);
 }

@@ -30,7 +30,7 @@ pub fn LruFuncs(T: type) type {
         pushPage: fn (self: *T, slab: Slab, page: PageNum) void,
         popPage: fn (self: *T, slab: Slab) ?PageNum,
 
-        setMovingPage: fn (self: *T, slab: Slab, page_num: PageNum) void,
+        setMovingPage: fn (self: *T, slab: Slab, page_num: ?PageNum) void,
         getMovingPage: fn (self: *T, slab: Slab) ?PageNum,
     };
 }
@@ -228,8 +228,12 @@ pub const FakeLruService = struct {
         return queue;
     }
 
-    pub fn setMovingPage(self: *Self, slab: Slab, page_num: PageNum) void {
-        self.moving_page_map.put(slab, page_num) catch unreachable;
+    pub fn setMovingPage(self: *Self, slab: Slab, page_num: ?PageNum) void {
+        if (page_num) |num| {
+            self.moving_page_map.put(slab, num) catch unreachable;
+        } else {
+            _ = self.moving_page_map.remove(slab);
+        }
     }
 
     pub fn getMovingPage(self: *Self, slab: Slab) ?PageNum {

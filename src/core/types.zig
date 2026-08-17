@@ -128,11 +128,19 @@ pub const LockSlot = struct {
 pub const SlabClass = struct {
     pub const IntType = u8;
     pub const MaxValue = std.math.maxInt(IntType);
+    const Self = @This();
 
     slab: IntType,
 
-    pub fn init(x: IntType) @This() {
+    pub fn init(x: IntType) Self {
         return .{ .slab = x };
+    }
+
+    pub fn nullEqual(self: Self, other: ?Self) bool {
+        const other_val = if (other) |x| x else {
+            return false;
+        };
+        return self.slab == other_val.slab;
     }
 };
 

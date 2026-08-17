@@ -106,6 +106,7 @@ pub const FakeLruService = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.moving_page_map.deinit();
         self.touch_list.deinit(self.gpa);
         self.destroyPageQueueMap();
         destroyMap(self.gpa, &self.free_map);

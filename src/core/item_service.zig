@@ -646,10 +646,7 @@ const ServiceTest = struct {
     fn checkInvariant(self: *Self) void {
         const gpa = std.testing.allocator;
 
-        var slab_page_map = std.AutoHashMap(SlabClass, PageNum).init(gpa);
-        defer slab_page_map.deinit();
-
-        var inuse_pages = std.AutoHashMap(PageNum, struct {}).init(gpa);
+        var inuse_pages = std.AutoHashMap(PageNum, SlabClass).init(gpa);
         defer inuse_pages.deinit();
 
         var slab_iter = self.slab_conf.getAllSlabClasses();
@@ -664,8 +661,7 @@ const ServiceTest = struct {
 
             var it = page_list.iterator();
             while (it.next()) |page_num| {
-                inuse_pages.put(page_num, .{}) catch unreachable;
-                slab_page_map.put(slab.slab_class, page_num) catch unreachable;
+                inuse_pages.put(page_num, slab.slab_class) catch unreachable;
                 self.checkSlabPageInvariant(slab, page_num);
             }
         }
@@ -674,9 +670,14 @@ const ServiceTest = struct {
         while (page_iter.next()) |page_num| {
             const null_slab = self.pager.getSlabClass(page_num);
             if (null_slab) |slab| {
-                std.debug.assert(inuse_pages.contains(page_num));
-                const slab_page = slab_page_map.get(slab);
-                std.debug.assert(page_num.nullEqual(slab_page));
+                const moving_page = self.lru_svc.getMovingPage(slab);
+                if (page_num.nullEqual(moving_page)) {
+                    std.debug.assert(!inuse_pages.contains(page_num));
+                } else {
+                    std.debug.assert(inuse_pages.contains(page_num));
+                    const page_slab = inuse_pages.get(page_num);
+                    std.debug.assert(slab.nullEqual(page_slab));
+                }
             } else {
                 std.debug.assert(!inuse_pages.contains(page_num));
             }
@@ -690,11 +691,16 @@ const ServiceTest = struct {
             self: *Self,
             total: usize,
             pub fn yield(ctx: *@This(), item: *Item) bool {
-                ctx.total += 1;
-
                 std.debug.assert(item.slab_flags.is_present);
                 std.debug.assert(item.slab.slab == ctx.slab.slab);
                 ctx.self.checkItemInSlab(item, ctx.slab);
+
+                const page_num = ctx.self.pager.getPageNumOfItem(item);
+                const moving_page = ctx.self.lru_svc.getMovingPage(ctx.slab);
+                if (!page_num.nullEqual(moving_page)) {
+                    ctx.total += 1;
+                }
+
                 return true;
             }
         }{

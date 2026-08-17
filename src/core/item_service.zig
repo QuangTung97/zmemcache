@@ -20,9 +20,25 @@ const PageNum = zpage.PageNum;
 const String = []const u8;
 const NullItem = ?*Item;
 
+const ItemOpaquePtr = struct {
+    item: *anyopaque,
+
+    const Self = @This();
+
+    fn init(item: *Item) Self {
+        return .{
+            .item = item,
+        };
+    }
+    fn equal(self: Self, other: *Item) bool {
+        const other_ptr: *anyopaque = other;
+        return self.item == other_ptr;
+    }
+};
+
 pub const ItemHash = struct {
     hash: HashValue,
-    item: *Item,
+    item: ItemOpaquePtr,
 };
 
 const ItemHashList = std.ArrayList(ItemHash);
@@ -298,7 +314,7 @@ pub fn ItemService(
                         const hash_val = HashFunc.hashKey(ctx.self._hasher, item.getKey());
                         const item_hash = ItemHash{
                             .hash = hash_val,
-                            .item = item,
+                            .item = .init(item),
                         };
                         ctx.delete_list.append(ctx.gpa, item_hash) catch unreachable;
                     } else {
@@ -338,8 +354,11 @@ pub fn ItemService(
                 return;
             };
 
+            std.debug.assert(item.slab_flags.is_present);
             self.doDeleteItem(hash_value, item, pitem);
         }
+
+        // TODO add finish move
 
         fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
@@ -450,7 +469,7 @@ pub fn ItemService(
                 return false;
             }
 
-            const pitem = self.findItemPointerInBucket(hash, deleted_item);
+            const pitem = self.findItemPointerInBucket(hash, .init(deleted_item));
             const null_item = pitem.*;
             if (null_item == null) {
                 return false;
@@ -508,12 +527,12 @@ pub fn ItemService(
             }
         }
 
-        fn findItemPointerInBucket(self: *Self, hash: HashValue, find_item: *Item) *NullItem {
+        fn findItemPointerInBucket(self: *Self, hash: HashValue, find_item: ItemOpaquePtr) *NullItem {
             self.assertItemLocked(hash);
 
             var pitem = self._table.getBucket(hash);
             while (pitem.*) |it| {
-                if (it == find_item) {
+                if (find_item.equal(it)) {
                     return pitem;
                 }
                 pitem = &it.hash_next;
@@ -922,7 +941,8 @@ const ServiceTest = struct {
         defer item_keys.deinit(self.gpa);
 
         for (items) |it| {
-            try item_keys.append(self.gpa, it.item.getKey());
+            const item: *Item = @ptrCast(@alignCast(it.item.item));
+            try item_keys.append(self.gpa, item.getKey());
         }
 
         try zutil.expectStringSlicesEqual(expected_keys, item_keys.items);

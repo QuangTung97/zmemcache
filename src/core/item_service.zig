@@ -325,6 +325,7 @@ pub fn ItemService(
             @memcpy(it.getKey(), key);
 
             // put to lru list
+            self.assertSlabLocked(&ctx, slab);
             LruFuncs.putItem(self._lru, slab, it);
 
             // add to bucket
@@ -491,6 +492,7 @@ pub fn ItemService(
             const page_num = LruFuncs.getMovingPage(self._lru, from_slab).?;
 
             // clear moving page
+            self.assertSlabLocked(&ctx, from_slab);
             LruFuncs.setMovingPage(self._lru, from_slab, null);
             self._pager.updatePageSlab(page_num, null);
         }

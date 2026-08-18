@@ -39,7 +39,7 @@ pub const AtomicFlags = struct {
 
     pub const SetStatus = enum {
         OK,
-        IsNotWarm,
+        IsCold,
     };
 
     pub fn init() Self {
@@ -49,22 +49,30 @@ pub const AtomicFlags = struct {
     }
 
     pub fn setActive(self: *Self) SetStatus {
+        var current = self._flags.load(.seq_cst);
         while (true) {
+            if (current & ActiveMask != 0) {
+                return .OK;
+            }
+
+            const lru_list = current >> LruListShift;
+            if (lru_list == @intFromEnum(LruList.Cold)) {
+                return .IsCold;
+            }
+
+            const new_value = current | ActiveMask;
+
             const null_current = self._flags.cmpxchgWeak(
-                WarmInactive,
-                WarmActive,
+                current,
+                new_value,
                 .seq_cst,
                 .seq_cst,
             );
-            const current = if (null_current) |x| x else {
+
+            if (null_current) |x| {
+                current = x;
+            } else {
                 return .OK;
-            };
-            if (current != WarmInactive) {
-                const lru = current >> LruListShift;
-                if (lru == @intFromEnum(LruList.Warm)) {
-                    return .OK;
-                }
-                return .IsNotWarm;
             }
         }
     }
@@ -269,7 +277,8 @@ test "atomic flags" {
     var flags = AtomicFlags.init();
 
     try expectEqual(AtomicFlags.Info{ .lru = .Hot, .is_active = false }, flags.getInfo());
-    try expectEqual(AtomicFlags.SetStatus.IsNotWarm, flags.setActive());
+    try expectEqual(AtomicFlags.SetStatus.OK, flags.setActive());
+    try expectEqual(AtomicFlags.Info{ .lru = .Hot, .is_active = true }, flags.getInfo());
 
     flags.setLru(.Warm);
     try expectEqual(AtomicFlags.Info{ .lru = .Warm, .is_active = false }, flags.getInfo());
@@ -285,6 +294,36 @@ test "atomic flags" {
     // set to cold
     flags.setLru(.Cold);
     try expectEqual(AtomicFlags.Info{ .lru = .Cold, .is_active = false }, flags.getInfo());
+}
+
+fn setActiveWhenHot(flags: *AtomicFlags) void {
+    for (0..10000) |_| {
+        flags.setLru(.Hot);
+        const status = flags.setActive();
+        zutil.runtimeAssert(status == .OK);
+    }
+}
+
+fn setActiveWhenWarm(flags: *AtomicFlags) void {
+    for (0..10000) |_| {
+        flags.setLru(.Warm);
+        const status = flags.setActive();
+        zutil.runtimeAssert(status == .OK);
+    }
+}
+
+test "atomic flags, set in parallel" {
+    const io = std.testing.io;
+
+    var group = std.Io.Group.init;
+    defer group.cancel(io);
+
+    var flags = AtomicFlags.init();
+
+    try group.concurrent(io, setActiveWhenHot, .{&flags});
+    try group.concurrent(io, setActiveWhenWarm, .{&flags});
+
+    try group.await(io);
 }
 
 test "check item size" {

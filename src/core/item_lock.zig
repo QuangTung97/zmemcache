@@ -4,6 +4,7 @@ const types = @import("types.zig");
 const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
 const LockSlot = types.LockSlot;
+const CachePadding = types.CachePadding;
 
 pub fn ItemLockFuncs(T: type) type {
     return struct {
@@ -34,10 +35,12 @@ pub fn NewItemLockFuncs(T: type) ItemLockFuncs(T) {
 pub const ItemLockService = struct {
     const Self = @This();
 
+    _before_padding: CachePadding = undefined,
     _io: std.Io,
     _gpa: Allocator,
     _table: []TableEntry,
     _mask: u64,
+    _after_padding: CachePadding = undefined,
 
     const TableEntry = struct {
         mutex: std.Io.Mutex,

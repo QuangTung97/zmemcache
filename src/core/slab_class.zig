@@ -5,6 +5,7 @@ const zutil = @import("zutil");
 const Allocator = std.mem.Allocator;
 const Item = types.Item;
 const SlabClass = types.SlabClass;
+const CachePadding = types.CachePadding;
 
 pub const SlabSize = struct {
     slab_class: SlabClass,
@@ -39,8 +40,10 @@ pub const SlabClassConfig = struct {
     const Self = @This();
     const ClassList = std.ArrayList(usize);
 
+    _before_padding: CachePadding = undefined,
     _gpa: Allocator,
     _all_classes: ClassList,
+    _after_padding: CachePadding = undefined,
 
     pub fn init(gpa: Allocator, min_size: usize, max_size: usize, ratio: f64) !Self {
         zutil.runtimeAssert(Item.Alignment.check(max_size));

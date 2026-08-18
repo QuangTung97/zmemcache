@@ -4,6 +4,7 @@ const zutil = @import("zutil");
 
 const Item = types.Item;
 const SlabClass = types.SlabClass;
+const CachePadding = types.CachePadding;
 
 const ItemAlignBytes = Item.Alignment.toByteUnits();
 
@@ -12,15 +13,14 @@ pub const Page = []align(ItemAlignBytes) u8;
 pub const PageNum = struct {
     page_num: u64,
 
-    const Self =@This();
-
+    const Self = @This();
 
     pub fn init(x: u64) Self {
         return .{ .page_num = x };
     }
 
-    pub fn nullEqual(self: Self, other: ?Self) bool{
-        const other_val= if (other) |v| v else {
+    pub fn nullEqual(self: Self, other: ?Self) bool {
+        const other_val = if (other) |v| v else {
             return false;
         };
         return self.page_num == other_val.page_num;
@@ -34,6 +34,7 @@ pub const GlobalPager = struct {
     const AtomicSlab = std.atomic.Value(u64);
 
     priv: struct {
+        _before_caching: CachePadding = undefined,
         io: std.Io,
         gpa: std.mem.Allocator,
 
@@ -44,6 +45,7 @@ pub const GlobalPager = struct {
         num_empty_pages: std.atomic.Value(u64),
         mut: std.Io.Mutex,
         pages_to_slab: []AtomicSlab,
+        _after_padding: CachePadding = undefined,
     },
 
     pub fn init(

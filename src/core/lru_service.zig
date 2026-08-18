@@ -26,6 +26,7 @@ pub fn LruFuncs(T: type) type {
 
         putFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
         getFreeItem: fn (self: *T, slab: Slab) ?*Item,
+        deleteFreeItem: fn (self: *T, slab: Slab, item: *Item) void,
 
         pushPage: fn (self: *T, slab: Slab, page: PageNum) void,
         popPage: fn (self: *T, slab: Slab) ?PageNum,
@@ -48,6 +49,7 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
 
         .putFreeItem = T.putFreeItem,
         .getFreeItem = T.getFreeItem,
+        .deleteFreeItem = T.deleteFreeItem,
 
         .pushPage = T.pushPage,
         .popPage = T.popPage,
@@ -150,11 +152,13 @@ pub const FakeLruService = struct {
     }
 
     pub fn putItem(self: *Self, slab: Slab, item: *Item) void {
+        std.debug.assert(item.slab_flags.is_present);
         const head = self.getLruList(slab);
         head.pushBack(&item.lru_list);
     }
 
     pub fn touchItem(self: *Self, slab: Slab, item: *Item) void {
+        std.debug.assert(item.slab_flags.is_present);
         const entry = TouchItem.init(slab, item.getKey());
         self.touch_list.append(self.gpa, entry) catch unreachable;
     }
@@ -176,6 +180,7 @@ pub const FakeLruService = struct {
     }
 
     pub fn putFreeItem(self: *Self, slab: Slab, item: *Item) void {
+        std.debug.assert(!item.slab_flags.is_present);
         const head = self.getFreeList(slab);
         head.pushBack(&item.lru_list);
     }
@@ -187,6 +192,11 @@ pub const FakeLruService = struct {
             return Item.fromList(node);
         }
         return null;
+    }
+
+    pub fn deleteFreeItem(_: *Self, _: Slab, item: *Item) void {
+        std.debug.assert(!item.slab_flags.is_present);
+        item.lru_list.remove();
     }
 
     fn getLruList(self: *Self, slab: Slab) *ListHead {
@@ -276,6 +286,14 @@ test "lock & unlock" {
 fn newItem(v: u64) Item {
     var item: Item = undefined;
     item.cas_num = CasNum.init(v);
+    item.slab_flags.is_present = true;
+    return item;
+}
+
+fn newFreeItem(v: u64) Item {
+    var item: Item = undefined;
+    item.cas_num = CasNum.init(v);
+    item.slab_flags.is_present = false;
     return item;
 }
 
@@ -339,9 +357,9 @@ test "free list" {
 
     const slab1 = Slab.init(11);
 
-    var item1 = newItem(41);
-    var item2 = newItem(42);
-    var item3 = newItem(43);
+    var item1 = newFreeItem(41);
+    var item2 = newFreeItem(42);
+    var item3 = newFreeItem(43);
 
     s.putFreeItem(slab1, &item1);
     s.putFreeItem(slab1, &item2);

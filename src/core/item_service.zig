@@ -340,6 +340,7 @@ pub fn ItemService(
             const IterateCtx = struct {
                 self: *Self,
                 gpa: Allocator,
+                slab: SlabClass,
                 delete_list: *ItemHashList,
                 fn yield(ctx: *@This(), item: *Item) bool {
                     if (item.slab_flags.is_present) {
@@ -350,7 +351,7 @@ pub fn ItemService(
                         };
                         ctx.delete_list.append(ctx.gpa, item_hash) catch unreachable;
                     } else {
-                        item.lru_list.remove(); // remove from free list
+                        LruFuncs.deleteFreeItem(ctx.self._lru, ctx.slab, item);
                     }
                     return true;
                 }
@@ -358,6 +359,7 @@ pub fn ItemService(
             var ctx = IterateCtx{
                 .self = self,
                 .gpa = gpa,
+                .slab = from_slab,
                 .delete_list = delete_list,
             };
 
@@ -598,7 +600,6 @@ pub fn ItemService(
 
             // clear present flag
             deleted_item.slab_flags.is_present = false;
-
             LruFuncs.deleteItem(self._lru, slab, deleted_item);
 
             const page_num = self._pager.getPageNumOfItem(deleted_item);

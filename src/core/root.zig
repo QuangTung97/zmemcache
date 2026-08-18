@@ -4,6 +4,7 @@ const slab_class = @import("slab_class.zig");
 const item_lock = @import("item_lock.zig");
 const lru_service = @import("lru_service.zig");
 const item_service = @import("item_service.zig");
+const modern_lru = @import("modern_lru.zig");
 
 test {
     _ = .{
@@ -13,5 +14,6 @@ test {
         item_lock,
         lru_service,
         item_service,
+        modern_lru,
     };
 }

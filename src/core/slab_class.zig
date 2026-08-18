@@ -115,6 +115,10 @@ pub const SlabClassConfig = struct {
             ._current = SlabClass.init(0),
         };
     }
+
+    pub fn getNumSlabClasses(self: *const Self) usize {
+        return self._all_classes.items.len;
+    }
 };
 
 const expectEqual = std.testing.expectEqual;
@@ -134,6 +138,9 @@ test "normal" {
     for (conf._all_classes.items) |x| {
         try std.testing.expect(Item.Alignment.check(x));
     }
+
+    // number of classes
+    try expectEqual(7, conf.getNumSlabClasses());
 
     // get slab class
     try expectEqual(SlabSize.init(0, 96), conf.getSlabFromItemSize(95));

@@ -5,6 +5,7 @@ const zlock = @import("item_lock.zig");
 const zlru = @import("lru_service.zig");
 const zpage = @import("page.zig");
 const zutil = @import("zutil");
+const zatomic = zutil.atomic;
 
 const Allocator = std.mem.Allocator;
 const CachePadding = types.CachePadding;
@@ -150,7 +151,7 @@ pub fn ItemService(
         // -----------------------------------------------------
         _before_padding: CachePadding = undefined, // padding
         _mover_need_delete: zutil.WaitGroup,
-        _last_cas: std.atomic.Value(u64),
+        _last_cas: zatomic.Value(u64),
         _after_padding: CachePadding = undefined, // padding
 
         const Self = @This();
@@ -400,7 +401,7 @@ pub fn ItemService(
             LruFuncs.lockSlab(self._lru, from_slab);
             defer LruFuncs.unlockSlab(self._lru, from_slab);
 
-            std.debug.assert(self._mover_need_delete._counter.load(.seq_cst) == 0);
+            std.debug.assert(self._mover_need_delete.getCounter() == 0);
 
             const page_num = LruFuncs.getMovingPage(self._lru, from_slab).?;
 
@@ -648,7 +649,7 @@ pub fn ItemService(
         }
 
         fn nextCasNum(self: *Self) CasNum {
-            const num = self._last_cas.fetchAdd(1, .seq_cst);
+            const num = self._last_cas.fetchAdd(1);
             return CasNum{ .cas = num + 1 };
         }
     };
@@ -1424,21 +1425,21 @@ test "start move page, 2 pages, with delete" {
     try expectEqual(move_page, s.startMovePage(slab1));
     try s.expectItemHashKeys(&.{ key03, key01 }, s.move_items.items);
     try s.expectItemKeysInSlab(slab1, &.{ key01, key03, key04 });
-    try expectEqual(2, s.svc._mover_need_delete._counter.load(.seq_cst));
+    try expectEqual(2, s.svc._mover_need_delete.getCounter());
 
     // delete mover key03
     s.deleteMoveItem(0);
 
     try s.expectItemKeysInBucket(hash3, &.{});
     try s.expectItemKeysInSlab(slab1, &.{ key01, key04 });
-    try expectEqual(1, s.svc._mover_need_delete._counter.load(.seq_cst));
+    try expectEqual(1, s.svc._mover_need_delete.getCounter());
 
     // delete mover key01
     s.deleteMoveItem(1);
 
     try s.expectItemKeysInBucket(hash1, &.{});
     try s.expectItemKeysInSlab(slab1, &.{key04});
-    try expectEqual(0, s.svc._mover_need_delete._counter.load(.seq_cst));
+    try expectEqual(0, s.svc._mover_need_delete.getCounter());
 
     // remove from source slab
     s.removePageFrom(slab1);
@@ -1467,7 +1468,7 @@ test "move page, delete and delete move item" {
     try expectEqual(move_page, s.startMovePage(slab1));
     try s.expectItemHashKeys(&.{ key03, key02, key01 }, s.move_items.items);
     try s.expectItemKeysInSlab(slab1, &.{ key01, key02, key03, key04 });
-    try expectEqual(3, s.svc._mover_need_delete._counter.load(.seq_cst));
+    try expectEqual(3, s.svc._mover_need_delete.getCounter());
 
     // delete
     s.delete(key03);
@@ -1476,7 +1477,7 @@ test "move page, delete and delete move item" {
     s.deleteMoveItem(0);
 
     try s.expectItemKeysInSlab(slab1, &.{ key01, key02, key04 });
-    try expectEqual(2, s.svc._mover_need_delete._counter.load(.seq_cst));
+    try expectEqual(2, s.svc._mover_need_delete.getCounter());
 }
 
 test "put with max evict attempt 3, evict ok" {

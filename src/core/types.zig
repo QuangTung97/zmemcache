@@ -1,5 +1,6 @@
 const std = @import("std");
 const zutil = @import("zutil");
+const zatomic = zutil.atomic;
 
 const Allocator = std.mem.Allocator;
 const ListHead = zutil.ListHead;
@@ -23,7 +24,7 @@ pub const LruList = enum(u8) {
 pub const AtomicFlags = struct {
     const Self = @This();
 
-    _flags: std.atomic.Value(u8),
+    _flags: zatomic.Value(u8),
 
     const LruListShift = 1;
     const WarmInactive: u8 = @intFromEnum(LruList.Warm) << LruListShift;
@@ -49,7 +50,7 @@ pub const AtomicFlags = struct {
     }
 
     pub fn setActive(self: *Self) SetStatus {
-        var current = self._flags.load(.seq_cst);
+        var current = self._flags.load();
         while (true) {
             if (current & ActiveMask != 0) {
                 return .OK;
@@ -62,12 +63,7 @@ pub const AtomicFlags = struct {
 
             const new_value = current | ActiveMask;
 
-            const null_current = self._flags.cmpxchgWeak(
-                current,
-                new_value,
-                .seq_cst,
-                .seq_cst,
-            );
+            const null_current = self._flags.cmpxchgWeak(current, new_value);
 
             if (null_current) |x| {
                 current = x;
@@ -79,11 +75,11 @@ pub const AtomicFlags = struct {
 
     pub fn setLru(self: *Self, lru: LruList) void {
         const values = @intFromEnum(lru) << LruListShift;
-        self._flags.store(values, .seq_cst);
+        self._flags.store(values);
     }
 
     pub fn getInfo(self: *const Self) Info {
-        const values = self._flags.load(.seq_cst);
+        const values = self._flags.load();
         const is_active = (values & ActiveMask) != 0;
         const lru_list: LruList = @enumFromInt(values >> LruListShift);
         return .{

@@ -3,6 +3,8 @@ const iter = @import("iterator.zig");
 const linked = @import("linked_list.zig");
 const wait_group = @import("wait_group.zig");
 
+pub const atomic = @import("atomic.zig");
+
 pub const expectIteratorValues = ztest.expectIteratorValues;
 pub const expectStringSlicesEqual = ztest.expectStringSlicesEqual;
 
@@ -22,5 +24,6 @@ test {
         iter,
         linked,
         wait_group,
+        atomic,
     };
 }

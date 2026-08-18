@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const zutil = @import("zutil");
+const zatomic = zutil.atomic;
 
 const Item = types.Item;
 const SlabClass = types.SlabClass;
@@ -32,7 +33,7 @@ pub const AtomicSlabNull = std.math.maxInt(u64);
 
 pub const GlobalPager = struct {
     const Self = @This();
-    const AtomicSlab = std.atomic.Value(u64);
+    const AtomicSlab = zatomic.Value(u64);
 
     priv: struct {
         _before_padding: CachePadding = undefined,
@@ -43,7 +44,7 @@ pub const GlobalPager = struct {
         page_size_shift: u6,
 
         all_pages: []align(ItemAlignBytes) u8,
-        num_empty_pages: std.atomic.Value(u64),
+        num_empty_pages: zatomic.Value(u64),
         mut: std.Io.Mutex,
         pages_to_slab: []AtomicSlab,
         all_page_heads: []ListHead,
@@ -112,7 +113,7 @@ pub const GlobalPager = struct {
     pub fn allocPage(self: *Self, slab: types.SlabClass) ?Page {
         const this = &self.priv;
 
-        var num_empty = this.num_empty_pages.load(.seq_cst);
+        var num_empty = this.num_empty_pages.load();
         if (num_empty == 0) {
             return null;
         }
@@ -122,14 +123,14 @@ pub const GlobalPager = struct {
         defer this.mut.unlock(this.io);
 
         // check again
-        num_empty = this.num_empty_pages.load(.seq_cst);
+        num_empty = this.num_empty_pages.load();
         if (num_empty == 0) {
             return null;
         }
 
         const num_pages = this.pages_to_slab.len;
         const index = num_pages - num_empty;
-        this.num_empty_pages.store(num_empty - 1, .seq_cst);
+        this.num_empty_pages.store(num_empty - 1);
 
         const page_num = PageNum{ .page_num = index };
         self.updatePageSlab(page_num, slab);
@@ -164,14 +165,14 @@ pub const GlobalPager = struct {
         const num_pages = this.pages_to_slab.len;
         std.debug.assert(page_num.page_num < num_pages);
         if (slab) |s| {
-            this.pages_to_slab[page_num.page_num].store(s.slab, .seq_cst);
+            this.pages_to_slab[page_num.page_num].store(s.slab);
         } else {
-            this.pages_to_slab[page_num.page_num].store(AtomicSlabNull, .seq_cst);
+            this.pages_to_slab[page_num.page_num].store(AtomicSlabNull);
         }
     }
 
     pub fn getSlabClass(self: *const Self, page_num: PageNum) ?types.SlabClass {
-        const slab_num = self.priv.pages_to_slab[page_num.page_num].load(.seq_cst);
+        const slab_num = self.priv.pages_to_slab[page_num.page_num].load();
         if (slab_num == AtomicSlabNull) {
             return null;
         }
@@ -261,8 +262,8 @@ test "basic" {
 
     try expectEqual(3 * 1024 * 1024, g.priv.all_pages.len);
     try expectEqual(3, g.priv.pages_to_slab.len);
-    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[0].load(.seq_cst));
-    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[2].load(.seq_cst));
+    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[0].load());
+    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[2].load());
 
     // test allocate pages
     const p1 = g.allocPage(.{ .slab = 11 }).?;
@@ -271,8 +272,8 @@ test "basic" {
 
     const p2 = g.allocPage(.{ .slab = 12 }).?;
     try expectEqual(g.priv.all_pages.ptr + g.priv.page_size, p2.ptr);
-    try expectEqual(11, g.priv.pages_to_slab[0].load(.seq_cst));
-    try expectEqual(12, g.priv.pages_to_slab[1].load(.seq_cst));
+    try expectEqual(11, g.priv.pages_to_slab[0].load());
+    try expectEqual(12, g.priv.pages_to_slab[1].load());
 
     const p3 = g.allocPage(.{ .slab = 13 }).?;
     try expectEqual(g.priv.all_pages.ptr + 2 * g.priv.page_size, p3.ptr);

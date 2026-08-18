@@ -1538,4 +1538,9 @@ test "put and then update value" {
     const slab0 = SlabClass.init(0);
     try s.expectItemKeysInBucket(hash1, &.{key01});
     try s.expectItemKeysInSlab(slab0, &.{key01});
+
+    // get
+    const getter1 = s.get(key01);
+    try std.testing.expectEqualStrings("123xy", getter1.Found.item.getValue());
+    s.finishGet(getter1.Found);
 }

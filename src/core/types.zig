@@ -6,15 +6,83 @@ const ListHead = zutil.ListHead;
 
 pub const CachePadding = [64]u8;
 
-pub const LruList = enum(u2) { Hot, Warm, Cold };
-
 pub const SlabFlags = packed struct {
     is_present: bool,
-    lru_list: LruList,
 };
 
 pub const ItemFlags = packed struct {
     set_partial: bool,
+};
+
+pub const LruList = enum(u8) {
+    Hot = 0,
+    Warm = 1,
+    Cold = 2,
+};
+
+pub const AtomicFlags = struct {
+    const Self = @This();
+
+    _flags: std.atomic.Value(u8),
+
+    const LruListShift = 1;
+    const WarmInactive: u8 = @intFromEnum(LruList.Warm) << LruListShift;
+
+    const ActiveShift = 0;
+    const ActiveMask = 1 << ActiveShift;
+    const WarmActive = WarmInactive | ActiveMask;
+
+    pub const Info = struct {
+        lru: LruList,
+        is_active: bool,
+    };
+
+    pub const SetStatus = enum {
+        OK,
+        IsNotWarm,
+    };
+
+    pub fn init() Self {
+        return .{
+            ._flags = .init(0),
+        };
+    }
+
+    pub fn setActive(self: *Self) SetStatus {
+        while (true) {
+            const null_current = self._flags.cmpxchgWeak(
+                WarmInactive,
+                WarmActive,
+                .seq_cst,
+                .seq_cst,
+            );
+            const current = if (null_current) |x| x else {
+                return .OK;
+            };
+            if (current != WarmInactive) {
+                const lru = current >> LruListShift;
+                if (lru == @intFromEnum(LruList.Warm)) {
+                    return .OK;
+                }
+                return .IsNotWarm;
+            }
+        }
+    }
+
+    pub fn setLru(self: *Self, lru: LruList) void {
+        const values = @intFromEnum(lru) << LruListShift;
+        self._flags.store(values, .seq_cst);
+    }
+
+    pub fn getInfo(self: *const Self) Info {
+        const values = self._flags.load(.seq_cst);
+        const is_active = (values & ActiveMask) != 0;
+        const lru_list: LruList = @enumFromInt(values >> LruListShift);
+        return .{
+            .lru = lru_list,
+            .is_active = is_active,
+        };
+    }
 };
 
 pub const RefCount = struct {
@@ -42,7 +110,7 @@ pub const Item = struct {
     key_len: u8, // constant
     slab: SlabClass, // constant
 
-    is_touched: std.atomic.Value(bool), // set = true when touched
+    is_touched: std.atomic.Value(bool), // set = true when touched TODO update
 
     refcount: RefCount, // protected by item lock
     value_len: u32, // constant
@@ -57,7 +125,6 @@ pub const Item = struct {
         const it: Self = .{
             .slab_flags = SlabFlags{
                 .is_present = true,
-                .lru_list = .Hot,
             },
             .item_flags = ItemFlags{
                 .set_partial = false,
@@ -196,6 +263,28 @@ const expectEqual = std.testing.expectEqual;
 
 test "cache padding" {
     try expectEqual(64, @sizeOf(CachePadding));
+}
+
+test "atomic flags" {
+    var flags = AtomicFlags.init();
+
+    try expectEqual(AtomicFlags.Info{ .lru = .Hot, .is_active = false }, flags.getInfo());
+    try expectEqual(AtomicFlags.SetStatus.IsNotWarm, flags.setActive());
+
+    flags.setLru(.Warm);
+    try expectEqual(AtomicFlags.Info{ .lru = .Warm, .is_active = false }, flags.getInfo());
+
+    // set active ok
+    try expectEqual(AtomicFlags.SetStatus.OK, flags.setActive());
+    try expectEqual(AtomicFlags.Info{ .lru = .Warm, .is_active = true }, flags.getInfo());
+
+    // set active again, do nothing
+    try expectEqual(AtomicFlags.SetStatus.OK, flags.setActive());
+    try expectEqual(AtomicFlags.Info{ .lru = .Warm, .is_active = true }, flags.getInfo());
+
+    // set to cold
+    flags.setLru(.Cold);
+    try expectEqual(AtomicFlags.Info{ .lru = .Cold, .is_active = false }, flags.getInfo());
 }
 
 test "check item size" {

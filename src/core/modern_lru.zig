@@ -7,6 +7,8 @@ const Allocator = std.mem.Allocator;
 const ListHead = zutil.ListHead;
 const SlabClass = types.SlabClass;
 const PageNum = zpage.PageNum;
+const Item = types.Item;
+const CasNum = types.CasNum;
 
 pub const ModernLru = struct {
     const Self = @This();
@@ -100,12 +102,99 @@ pub const ModernLru = struct {
         state.mutex.unlock(self._io);
     }
 
+    pub fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+        self.expectSlabLocked(slab);
+        std.debug.assert(!item.slab_flags.is_present);
+
+        const state = self.getSlabState(slab);
+        state.free_list.pushBack(&item.lru_list);
+        state.num_free += 1;
+    }
+
+    pub fn getFreeItem(self: *Self, slab: SlabClass) ?*Item {
+        self.expectSlabLocked(slab);
+
+        const state = self.getSlabState(slab);
+        const null_entry = state.free_list.popBack();
+        const entry = null_entry orelse return null;
+
+        const item = Item.fromList(entry);
+        state.num_free -= 1;
+
+        return item;
+    }
+
     fn getSlabState(self: *Self, slab: SlabClass) *SlabClassState {
         return &self._all_classes[slab.slab];
     }
+
+    fn expectSlabLocked(self: *Self, slab: SlabClass) void {
+        const state = self.getSlabState(slab);
+        std.debug.assert(state.is_locked);
+    }
 };
 
+// ===========================================================================
+// Testing
+// ===========================================================================
+
 const expectEqual = std.testing.expectEqual;
+
+const ServiceTest = struct {
+    const Self = @This();
+
+    svc: ModernLru,
+
+    fn init() !*Self {
+        const io = std.testing.io;
+        const gpa = std.testing.allocator;
+
+        const s = try gpa.create(Self);
+        s.svc = try ModernLru.init(io, gpa, 5);
+
+        return s;
+    }
+
+    fn deinit(self: *Self) void {
+        self.checkInvariant();
+
+        const gpa = std.testing.allocator;
+        self.svc.deinit();
+        gpa.destroy(self);
+    }
+
+    fn newFreeItem(_: *Self, cas: u64) Item {
+        var item: Item = undefined;
+        item.slab_flags.is_present = false;
+        item.cas_num = CasNum.init(cas);
+        return item;
+    }
+
+    fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+        self.svc.lockSlab(slab);
+        defer self.svc.unlockSlab(slab);
+
+        self.svc.putFreeItem(slab, item);
+
+        self.checkInvariant();
+    }
+
+    fn getFreeItem(self: *Self, slab: SlabClass) ?u64 {
+        defer self.checkInvariant();
+
+        self.svc.lockSlab(slab);
+        defer self.svc.unlockSlab(slab);
+
+        const null_item = self.svc.getFreeItem(slab);
+        if (null_item) |it| {
+            return it.cas_num.cas;
+        }
+
+        return null;
+    }
+
+    fn checkInvariant(_: *Self) void {}
+};
 
 test "slab class state size" {
     try expectEqual(64 * 3, @sizeOf(ModernLru.SlabClassState));
@@ -114,25 +203,53 @@ test "slab class state size" {
 // TODO check impl
 
 test "locking" {
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-
-    var s = try ModernLru.init(io, gpa, 5);
+    const s = try ServiceTest.init();
     defer s.deinit();
 
     const slab0 = SlabClass.init(0);
     const slab1 = SlabClass.init(1);
 
-    try expectEqual(false, s.isSlabLocked(slab0));
-    try expectEqual(false, s.isSlabLocked(slab1));
+    try expectEqual(false, s.svc.isSlabLocked(slab0));
+    try expectEqual(false, s.svc.isSlabLocked(slab1));
 
-    s.lockSlab(slab1);
+    s.svc.lockSlab(slab1);
 
-    try expectEqual(false, s.isSlabLocked(slab0));
-    try expectEqual(true, s.isSlabLocked(slab1));
+    try expectEqual(false, s.svc.isSlabLocked(slab0));
+    try expectEqual(true, s.svc.isSlabLocked(slab1));
 
-    s.unlockSlab(slab1);
+    s.svc.unlockSlab(slab1);
 
-    try expectEqual(false, s.isSlabLocked(slab0));
-    try expectEqual(false, s.isSlabLocked(slab1));
+    try expectEqual(false, s.svc.isSlabLocked(slab0));
+    try expectEqual(false, s.svc.isSlabLocked(slab1));
+}
+
+test "free list" {
+    var s = try ServiceTest.init();
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+    const slab2 = SlabClass.init(2);
+
+    var item1 = s.newFreeItem(11);
+    var item2 = s.newFreeItem(12);
+    var item3 = s.newFreeItem(13);
+
+    // put
+    s.putFreeItem(slab1, &item1);
+    s.putFreeItem(slab1, &item2);
+    s.putFreeItem(slab2, &item3);
+
+    try expectEqual(2, s.svc.getSlabState(slab1).num_free);
+    try expectEqual(1, s.svc.getSlabState(slab2).num_free);
+
+    // get
+    try expectEqual(12, s.getFreeItem(slab1));
+    try expectEqual(1, s.svc.getSlabState(slab1).num_free);
+    try expectEqual(1, s.svc.getSlabState(slab2).num_free);
+
+    // get all
+    try expectEqual(11, s.getFreeItem(slab1));
+    try expectEqual(null, s.getFreeItem(slab1));
+    try expectEqual(0, s.svc.getSlabState(slab1).num_free);
+    try expectEqual(1, s.svc.getSlabState(slab2).num_free);
 }

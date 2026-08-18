@@ -224,10 +224,7 @@ pub fn ItemService(
 
             // try to get free item
             const null_item = self.getFreeItem(slab_size, lock_slot);
-            const it = if (null_item) |x| x else {
-                // return if not found
-                return null;
-            };
+            const it = null_item orelse return null;
 
             // init item
             const cas_num = self.nextCasNum();
@@ -274,9 +271,7 @@ pub fn ItemService(
 
             const pitem = self.findItemPointerWithKey(hash_value, key);
             const null_item = pitem.*;
-            const it = if (null_item) |p| p else {
-                return .{ .NotFound = .{} };
-            };
+            const it = null_item orelse return .{ .NotFound = .{} };
 
             if (it.item_flags.set_partial) {
                 return .{ .SetPartial = .{} };
@@ -315,9 +310,7 @@ pub fn ItemService(
 
             const pitem = self.findItemPointerWithKey(hash_value, key);
             const null_item = pitem.*;
-            const it = if (null_item) |p| p else {
-                return;
-            };
+            const it = null_item orelse return;
 
             self.doDeleteItem(hash_value, it, pitem);
         }
@@ -328,9 +321,7 @@ pub fn ItemService(
             defer LruFuncs.unlockSlab(self._lru, from_slab);
 
             const null_page_num = LruFuncs.popPage(self._lru, from_slab);
-            const page_num = if (null_page_num) |num| num else {
-                return null;
-            };
+            const page_num = null_page_num orelse return null;
 
             const item_size = self._slab_conf.getItemSizeOfSlab(from_slab);
             const moving_page = self._pager.getPageOfPageNum(page_num);
@@ -385,9 +376,7 @@ pub fn ItemService(
 
             const pitem = self.findItemPointerInBucket(hash_value, item_hash.item);
             const null_item = pitem.*;
-            const item = if (null_item) |p| p else {
-                return;
-            };
+            const item = null_item orelse return;
 
             std.debug.assert(item.slab_flags.is_present);
             self.doDeleteItem(hash_value, item, pitem);
@@ -434,8 +423,8 @@ pub fn ItemService(
             // try to get new page from page pool
             self.getNewPageFromPool(slab);
 
-            const null_item2n = LruFuncs.getFreeItem(self._lru, slab.slab_class);
-            if (null_item2n) |it| {
+            const null_item2 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
+            if (null_item2) |it| {
                 return it;
             }
 
@@ -449,9 +438,7 @@ pub fn ItemService(
             self.assertSlabLocked(slab.slab_class);
 
             const null_page = self._pager.allocPage(slab.slab_class);
-            const page = if (null_page) |p| p else {
-                return;
-            };
+            const page = null_page orelse return;
 
             self.addFreePageToSlab(slab.slab_class, slab.item_size, page);
         }
@@ -885,9 +872,7 @@ const ServiceTest = struct {
         var slab_iter = self.slab_conf.getAllSlabClasses();
         while (slab_iter.next()) |slab| {
             const null_page_list = self.lru_svc.page_queue_map.get(slab.slab_class);
-            const page_list = if (null_page_list) |h| h else {
-                continue;
-            };
+            const page_list = null_page_list orelse continue;
 
             const num_pages = page_list.len;
             self.checkSlabInvariant(slab.slab_class, num_pages);

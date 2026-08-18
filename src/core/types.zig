@@ -62,9 +62,7 @@ pub const AtomicFlags = struct {
             }
 
             const new_value = current | ActiveMask;
-
             const null_current = self._flags.cmpxchgWeak(current, new_value);
-
             if (null_current) |x| {
                 current = x;
             } else {

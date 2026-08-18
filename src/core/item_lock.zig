@@ -11,7 +11,6 @@ pub fn ItemLockFuncs(T: type) type {
         getTableSize: fn (self: *const T) LockSlot,
         getSlot: fn (self: *const T, hash: HashValue) LockSlot,
         lock: fn (self: *T, slot: LockSlot) void,
-        isLocked: fn (self: *const T, slot: LockSlot) bool, // TODO remove
         tryLock: fn (self: *T, slot: LockSlot) bool,
         unlock: fn (self: *T, slot: LockSlot) void,
     };
@@ -22,7 +21,6 @@ pub fn NewItemLockFuncs(T: type) ItemLockFuncs(T) {
         .getTableSize = T.getTableSize,
         .getSlot = T.getSlot,
         .lock = T.lock,
-        .isLocked = T.isLocked,
         .tryLock = T.tryLock,
         .unlock = T.unlock,
     };
@@ -103,10 +101,10 @@ pub const ItemLockService = struct {
         entry.mutex.unlock(self._io);
     }
 
-    // TODO remove
-    pub fn isLocked(self: *const Self, slot: LockSlot) bool {
+    fn isLocked(self: *Self, slot: LockSlot) bool {
+        // for testing only
         const entry = &self._table[slot.lock_slot];
-        return entry.is_locked;
+        return entry.mutex.state.load(.seq_cst) == .locked_once;
     }
 };
 
@@ -271,9 +269,9 @@ test "fake item locks" {
     m.unlock(&obj, LockSlot.init(11));
 
     // check is locked
-    try expectEqual(false, m.isLocked(&obj, LockSlot.init(11)));
-    try expectEqual(true, m.isLocked(&obj, LockSlot.init(12)));
-    try expectEqual(true, m.isLocked(&obj, LockSlot.init(13)));
+    try expectEqual(false, obj.isLocked(LockSlot.init(11)));
+    try expectEqual(true, obj.isLocked(LockSlot.init(12)));
+    try expectEqual(true, obj.isLocked(LockSlot.init(13)));
 
     // check actions
     try std.testing.expectEqualSlices(

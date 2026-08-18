@@ -2,12 +2,14 @@ const std = @import("std");
 const zutil = @import("zutil");
 const types = @import("types.zig");
 const zpage = @import("page.zig");
+const zlru = @import("lru_service.zig");
 
 const Allocator = std.mem.Allocator;
 const ListHead = zutil.ListHead;
 const SlabClass = types.SlabClass;
 const PageNum = zpage.PageNum;
 const Item = types.Item;
+const ItemIter = zlru.ItemIter;
 const CasNum = types.CasNum;
 
 pub const ModernLru = struct {
@@ -100,6 +102,48 @@ pub const ModernLru = struct {
         const state = self.getSlabState(slab);
         state.is_locked = false;
         state.mutex.unlock(self._io);
+    }
+
+    pub fn putItem(self: *Self, slab: SlabClass, _: *Item) void {
+        self.expectSlabLocked(slab);
+        // TODO
+    }
+
+    pub fn touchItem(_: *Self, _: SlabClass, _: *Item) void {
+        // TODO
+    }
+
+    pub fn deleteItem(self: *Self, slab: SlabClass, _: *Item) void {
+        self.expectSlabLocked(slab);
+        // TODO
+    }
+
+    pub fn iterateItems(self: *Self, slab: SlabClass, _: ItemIter) void {
+        self.expectSlabLocked(slab);
+        // TODO
+    }
+
+    pub fn pushPage(self: *Self, slab: SlabClass, _: PageNum) void {
+        self.expectSlabLocked(slab);
+        // TODO
+    }
+
+    pub fn popPage(self: *Self, slab: SlabClass) ?PageNum {
+        self.expectSlabLocked(slab);
+        // TODO
+        return null;
+    }
+
+    pub fn setMovingPage(self: *Self, slab: SlabClass, page_num: ?PageNum) void {
+        self.expectSlabLocked(slab);
+        const state = self.getSlabState(slab);
+        state.moving_page = page_num;
+    }
+
+    pub fn getMovingPage(self: *Self, slab: SlabClass) ?PageNum {
+        self.expectSlabLocked(slab);
+        const state = self.getSlabState(slab);
+        return state.moving_page;
     }
 
     pub fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
@@ -216,7 +260,10 @@ test "slab class state size" {
     try expectEqual(64 * 3, @sizeOf(ModernLru.SlabClassState));
 }
 
-// TODO check impl
+test "check impl" {
+    const m = zlru.NewLruFuncs(ModernLru);
+    _ = m;
+}
 
 test "locking" {
     const s = try ServiceTest.init();
@@ -296,4 +343,24 @@ test "free list, with delete" {
     try expectEqual(11, s.getFreeItem(slab1));
     try expectEqual(null, s.getFreeItem(slab1));
     try expectEqual(0, s.svc.getSlabState(slab1).num_free);
+}
+
+test "moving page" {
+    var s = try ServiceTest.init();
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    s.svc.lockSlab(slab1);
+    defer s.svc.unlockSlab(slab1);
+
+    try expectEqual(null, s.svc.getMovingPage(slab1));
+
+    // set
+    s.svc.setMovingPage(slab1, PageNum.init(21));
+    try expectEqual(PageNum.init(21), s.svc.getMovingPage(slab1));
+
+    // set null
+    s.svc.setMovingPage(slab1, null);
+    try expectEqual(null, s.svc.getMovingPage(slab1));
 }

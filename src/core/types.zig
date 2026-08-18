@@ -324,6 +324,8 @@ test "atomic flags, set in parallel" {
     try group.concurrent(io, setActiveWhenWarm, .{&flags});
 
     try group.await(io);
+
+    try expectEqual(true, flags.getInfo().is_active);
 }
 
 test "check item size" {

@@ -1,15 +1,16 @@
 const std = @import("std");
 const types = @import("types.zig");
 
+const Allocator = std.mem.Allocator;
 const HashValue = types.HashValue;
 const LockSlot = types.LockSlot;
 
 pub fn ItemLockFuncs(T: type) type {
     return struct {
         getTableSize: fn (self: *const T) LockSlot,
-        getSlot: fn (self: *T, hash: HashValue) LockSlot,
+        getSlot: fn (self: *const T, hash: HashValue) LockSlot,
         lock: fn (self: *T, slot: LockSlot) void,
-        isLocked: fn (self: *T, slot: LockSlot) bool,
+        isLocked: fn (self: *const T, slot: LockSlot) bool,
         tryLock: fn (self: *T, slot: LockSlot) bool,
         unlock: fn (self: *T, slot: LockSlot) void,
     };
@@ -24,6 +25,143 @@ pub fn NewItemLockFuncs(T: type) ItemLockFuncs(T) {
         .tryLock = T.tryLock,
         .unlock = T.unlock,
     };
+}
+
+// ===========================================================================
+// Item Lock Service
+// ===========================================================================
+
+pub const ItemLockService = struct {
+    const Self = @This();
+
+    _io: std.Io,
+    _gpa: Allocator,
+    _table: []TableEntry,
+    _mask: u64,
+
+    const TableEntry = struct {
+        mutex: std.Io.Mutex,
+        is_locked: bool,
+    };
+
+    pub fn init(io: std.Io, gpa: Allocator, table_size_log: u6) !Self {
+        const table_size: u64 = @as(u64, 1) << table_size_log;
+
+        // init table
+        const table = try gpa.alloc(TableEntry, table_size);
+        for (table) |*e| {
+            e.* = .{
+                .mutex = .init,
+                .is_locked = false,
+            };
+        }
+
+        return .{
+            ._io = io,
+            ._gpa = gpa,
+            ._table = table,
+            ._mask = table_size - 1,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self._gpa.free(self._table);
+    }
+
+    pub fn getTableSize(self: *const Self) LockSlot {
+        return LockSlot.init(self._table.len);
+    }
+
+    pub fn getSlot(self: *const Self, hash: HashValue) LockSlot {
+        return LockSlot.init(hash.hash & self._mask);
+    }
+
+    pub fn lock(self: *Self, slot: LockSlot) void {
+        const entry = &self._table[slot.lock_slot];
+        entry.mutex.lockUncancelable(self._io);
+        entry.is_locked = true;
+    }
+
+    pub fn tryLock(self: *Self, slot: LockSlot) bool {
+        const entry = &self._table[slot.lock_slot];
+
+        const ok = entry.mutex.tryLock();
+        if (!ok) {
+            return false;
+        }
+
+        entry.is_locked = true;
+        return true;
+    }
+
+    pub fn unlock(self: *Self, slot: LockSlot) void {
+        const entry = &self._table[slot.lock_slot];
+        entry.is_locked = false;
+        entry.mutex.unlock(self._io);
+    }
+
+    pub fn isLocked(self: *const Self, slot: LockSlot) bool {
+        const entry = &self._table[slot.lock_slot];
+        return entry.is_locked;
+    }
+};
+
+// ===========================================================================
+// Test Item Lock Service
+// ===========================================================================
+
+const expectEqual = std.testing.expectEqual;
+
+test "item lock service impl" {
+    const m = NewItemLockFuncs(ItemLockService);
+    _ = m;
+}
+
+test "table entry size" {
+    try expectEqual(8, @sizeOf(ItemLockService.TableEntry));
+}
+
+test "item lock service" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    var svc = try ItemLockService.init(io, gpa, 2);
+    defer svc.deinit();
+
+    try expectEqual(4, svc.getTableSize().lock_slot);
+
+    // check get slot
+    try expectEqual(LockSlot.init(1), svc.getSlot(HashValue.init(5)));
+    try expectEqual(LockSlot.init(0), svc.getSlot(HashValue.init(4)));
+    try expectEqual(LockSlot.init(3), svc.getSlot(HashValue.init(7)));
+
+    const slot1 = LockSlot.init(1);
+    const slot2 = LockSlot.init(2);
+
+    try expectEqual(false, svc.isLocked(slot1));
+    try expectEqual(false, svc.isLocked(slot2));
+
+    // lock
+    svc.lock(slot1);
+    try expectEqual(true, svc.isLocked(slot1));
+    try expectEqual(false, svc.isLocked(slot2));
+
+    // unlock
+    svc.unlock(slot1);
+    try expectEqual(false, svc.isLocked(slot1));
+    try expectEqual(false, svc.isLocked(slot2));
+
+    // try lock
+    try expectEqual(true, svc.tryLock(slot1));
+    try expectEqual(true, svc.isLocked(slot1));
+    try expectEqual(false, svc.isLocked(slot2));
+
+    // try lock not ok
+    try expectEqual(false, svc.tryLock(slot1));
+
+    svc.unlock(slot1);
+    try expectEqual(false, svc.isLocked(slot1));
+    try expectEqual(false, svc.isLocked(slot2));
 }
 
 // ===========================================================================
@@ -67,7 +205,7 @@ pub const FakeItemLocks = struct {
         return LockSlot.init(16);
     }
 
-    pub fn getSlot(_: *Self, hash: HashValue) LockSlot {
+    pub fn getSlot(_: *const Self, hash: HashValue) LockSlot {
         return LockSlot{ .lock_slot = hash.hash };
     }
 
@@ -80,7 +218,7 @@ pub const FakeItemLocks = struct {
         }) catch unreachable;
     }
 
-    pub fn isLocked(self: *Self, slot: LockSlot) bool {
+    pub fn isLocked(self: *const Self, slot: LockSlot) bool {
         return self.lockedSet.contains(slot);
     }
 
@@ -109,8 +247,6 @@ pub const FakeItemLocks = struct {
 // ===========================================================================
 // Testing
 // ===========================================================================
-
-const expectEqual = std.testing.expectEqual;
 
 test "fake item locks" {
     var obj = FakeItemLocks.init(std.testing.allocator);

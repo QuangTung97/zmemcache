@@ -172,6 +172,16 @@ const LockCtx = struct {
         }
         return false;
     }
+
+    fn addSlab(self: *Self, slab: SlabClass) void {
+        std.debug.assert(self.slab == null);
+        self.slab = slab;
+    }
+
+    fn removeSlab(self: *Self, slab: SlabClass) void {
+        std.debug.assert(slab.nullEqual(self.slab));
+        self.slab = null;
+    }
 };
 
 pub fn ItemService(
@@ -261,6 +271,16 @@ pub fn ItemService(
             ItemLocks.unlock(self._locker, slot);
         }
 
+        fn lockSlab(self: *Self, ctx: *LockCtx, slab: SlabClass) void {
+            LruFuncs.lockSlab(self._lru, slab);
+            ctx.addSlab(slab);
+        }
+
+        fn unlockSlab(self: *Self, ctx: *LockCtx, slab: SlabClass) void {
+            LruFuncs.unlockSlab(self._lru, slab);
+            ctx.removeSlab(slab);
+        }
+
         pub fn put(self: *Self, key: String, value_len: usize) ?ItemSetter {
             // compute hash value & lock slot
             const hash_value = HashFunc.hashKey(self._hasher, key);
@@ -284,8 +304,8 @@ pub fn ItemService(
             }
 
             // lock slab
-            LruFuncs.lockSlab(self._lru, slab);
-            defer LruFuncs.unlockSlab(self._lru, slab);
+            self.lockSlab(&ctx, slab);
+            defer self.unlockSlab(&ctx, slab);
 
             // try to get free item
             const null_item = self.getFreeItem(&ctx, slab_size, lock_slot);
@@ -386,8 +406,9 @@ pub fn ItemService(
 
         pub fn startMovePage(self: *Self, from_slab: SlabClass, gpa: Allocator, delete_list: *ItemHashList) ?PageNum {
             // lock the slab
-            LruFuncs.lockSlab(self._lru, from_slab);
-            defer LruFuncs.unlockSlab(self._lru, from_slab);
+            var lock_ctx = LockCtx.init();
+            self.lockSlab(&lock_ctx, from_slab);
+            defer self.unlockSlab(&lock_ctx, from_slab);
 
             const null_page_num = LruFuncs.popPage(self._lru, from_slab);
             const page_num = null_page_num orelse return null;
@@ -457,8 +478,9 @@ pub fn ItemService(
             self._mover_need_delete.wait();
 
             // lock the slab
-            LruFuncs.lockSlab(self._lru, from_slab);
-            defer LruFuncs.unlockSlab(self._lru, from_slab);
+            var ctx = LockCtx.init();
+            self.lockSlab(&ctx, from_slab);
+            defer self.unlockSlab(&ctx, from_slab);
 
             std.debug.assert(self._mover_need_delete.getCounter() == 0);
 
@@ -471,19 +493,20 @@ pub fn ItemService(
 
         pub fn addPageTo(self: *Self, to_slab: SlabClass, page_num: PageNum) void {
             // lock the slab
-            LruFuncs.lockSlab(self._lru, to_slab);
-            defer LruFuncs.unlockSlab(self._lru, to_slab);
+            var ctx = LockCtx.init();
+            self.lockSlab(&ctx, to_slab);
+            defer self.unlockSlab(&ctx, to_slab);
 
             self._pager.updatePageSlab(page_num, to_slab);
 
             // add free items of new page to this slab
             const page = self._pager.getPageOfPageNum(page_num);
             const item_size = self._slab_conf.getItemSizeOfSlab(to_slab);
-            self.addFreePageToSlab(to_slab, item_size, page);
+            self.addFreePageToSlab(&ctx, to_slab, item_size, page);
         }
 
         fn getFreeItem(self: *Self, ctx: *LockCtx, slab: SlabSize, lock_slot: LockSlot) ?*Item {
-            self.assertSlabLocked(slab.slab_class);
+            self.assertSlabLocked(ctx, slab.slab_class);
 
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
             if (null_item1) |it| {
@@ -491,7 +514,7 @@ pub fn ItemService(
             }
 
             // try to get new page from page pool
-            self.getNewPageFromPool(slab);
+            self.getNewPageFromPool(ctx, slab);
 
             const null_item2 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
             if (null_item2) |it| {
@@ -504,22 +527,23 @@ pub fn ItemService(
             return LruFuncs.getFreeItem(self._lru, slab.slab_class);
         }
 
-        fn getNewPageFromPool(self: *Self, slab: SlabSize) void {
-            self.assertSlabLocked(slab.slab_class);
+        fn getNewPageFromPool(self: *Self, ctx: *LockCtx, slab: SlabSize) void {
+            self.assertSlabLocked(ctx, slab.slab_class);
 
             const null_page = self._pager.allocPage(slab.slab_class);
             const page = null_page orelse return;
 
-            self.addFreePageToSlab(slab.slab_class, slab.item_size, page);
+            self.addFreePageToSlab(ctx, slab.slab_class, slab.item_size, page);
         }
 
         fn addFreePageToSlab(
             self: *Self,
+            lock_ctx: *LockCtx,
             slab_class: SlabClass,
             item_size: usize,
             page: zpage.Page,
         ) void {
-            self.assertSlabLocked(slab_class);
+            self.assertSlabLocked(lock_ctx, slab_class);
 
             // iterate and add to free item list
             const IterateCtx = struct {
@@ -553,7 +577,7 @@ pub fn ItemService(
             slab: SlabClass,
             current_slot: LockSlot,
         ) void {
-            self.assertSlabLocked(slab);
+            self.assertSlabLocked(lock_ctx, slab);
 
             var ctx = struct {
                 self: *Self,
@@ -592,7 +616,7 @@ pub fn ItemService(
 
         fn tryToEvictItem(self: *Self, ctx: *LockCtx, evicted_item: *Item, current_slot: LockSlot) bool {
             const slab = evicted_item.slab;
-            self.assertSlabLocked(slab);
+            self.assertSlabLocked(ctx, slab);
 
             const new_hash = HashFunc.hashKey(self._hasher, evicted_item.getKey());
             const new_slot = ItemLocks.getSlot(self._locker, new_hash);
@@ -649,20 +673,21 @@ pub fn ItemService(
             }
 
             const slab = deleted_item.slab;
-            if (LruFuncs.isSlabLocked(self._lru, slab)) {
-                self.doMoveItemFromLruToFree(deleted_item);
+            if (slab.nullEqual(ctx.slab)) {
+                // if slab already locked
+                self.doMoveItemFromLruToFree(ctx, deleted_item);
             } else {
                 // lock then delete
-                LruFuncs.lockSlab(self._lru, slab);
-                defer LruFuncs.unlockSlab(self._lru, slab);
+                self.lockSlab(ctx, slab);
+                defer self.unlockSlab(ctx, slab);
 
-                self.doMoveItemFromLruToFree(deleted_item);
+                self.doMoveItemFromLruToFree(ctx, deleted_item);
             }
         }
 
-        fn doMoveItemFromLruToFree(self: *Self, deleted_item: *Item) void {
+        fn doMoveItemFromLruToFree(self: *Self, ctx: *LockCtx, deleted_item: *Item) void {
             const slab = deleted_item.slab;
-            self.assertSlabLocked(slab);
+            self.assertSlabLocked(ctx, slab);
 
             // clear present flag
             deleted_item.slab_flags.is_present = false;
@@ -709,8 +734,8 @@ pub fn ItemService(
             std.debug.assert(ctx.containSlot(slot));
         }
 
-        fn assertSlabLocked(self: *Self, slab: SlabClass) void {
-            std.debug.assert(LruFuncs.isSlabLocked(self._lru, slab));
+        fn assertSlabLocked(_: *Self, ctx: *LockCtx, slab: SlabClass) void {
+            std.debug.assert(slab.nullEqual(ctx.slab));
         }
 
         fn nextCasNum(self: *Self) CasNum {
@@ -929,8 +954,8 @@ const ServiceTest = struct {
         const item = null_item.?;
         const slab = item.slab;
 
-        LruFuncs.lockSlab(self.svc._lru, slab);
-        defer LruFuncs.unlockSlab(self.svc._lru, slab);
+        self.svc.lockSlab(&ctx, slab);
+        defer self.svc.unlockSlab(&ctx, slab);
 
         return self.svc.tryToEvictItem(&ctx, item, lock_slot);
     }
@@ -947,8 +972,8 @@ const ServiceTest = struct {
 
         // lock slab
         const slab = item.slab;
-        LruFuncs.lockSlab(self.svc._lru, slab);
-        defer LruFuncs.unlockSlab(self.svc._lru, slab);
+        self.svc.lockSlab(&ctx, slab);
+        defer self.svc.unlockSlab(&ctx, slab);
 
         return self.svc.tryToEvictItem(&ctx, item, lock_slot);
     }

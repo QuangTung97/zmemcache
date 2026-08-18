@@ -17,7 +17,6 @@ pub const ModernLru = struct {
 
     const SlabClassState = struct {
         mutex: std.Io.Mutex,
-        is_locked: bool,
 
         free_list: ListHead,
         hot_list: ListHead,
@@ -46,7 +45,6 @@ pub const ModernLru = struct {
         for (all_classes) |*s| {
             s.* = .{
                 .mutex = .init,
-                .is_locked = false,
 
                 .free_list = undefined,
                 .hot_list = undefined,
@@ -90,23 +88,20 @@ pub const ModernLru = struct {
     pub fn lockSlab(self: *Self, slab: SlabClass) void {
         const state = self.getSlabState(slab);
         state.mutex.lockUncancelable(self._io);
-        state.is_locked = true;
     }
 
-    pub fn isSlabLocked(self: *Self, slab: SlabClass) bool {
+    // for testing only
+    fn isSlabLocked(self: *Self, slab: SlabClass) bool {
         const state = self.getSlabState(slab);
-        return state.is_locked;
+        return state.mutex.state.load(.seq_cst) == .locked_once;
     }
 
     pub fn unlockSlab(self: *Self, slab: SlabClass) void {
-        self.expectSlabLocked(slab);
         const state = self.getSlabState(slab);
-        state.is_locked = false;
         state.mutex.unlock(self._io);
     }
 
-    pub fn putItem(self: *Self, slab: SlabClass, _: *Item) void {
-        self.expectSlabLocked(slab);
+    pub fn putItem(_: *Self, _: SlabClass, _: *Item) void {
         // TODO
     }
 
@@ -114,51 +109,41 @@ pub const ModernLru = struct {
         // TODO
     }
 
-    pub fn deleteItem(self: *Self, slab: SlabClass, _: *Item) void {
-        self.expectSlabLocked(slab);
+    pub fn deleteItem(_: *Self, _: SlabClass, _: *Item) void {
         // TODO
     }
 
-    pub fn iterateItems(self: *Self, slab: SlabClass, _: ItemIter) void {
-        self.expectSlabLocked(slab);
+    pub fn iterateItems(_: *Self, _: SlabClass, _: ItemIter) void {
         // TODO
     }
 
-    pub fn pushPage(self: *Self, slab: SlabClass, _: PageNum) void {
-        self.expectSlabLocked(slab);
+    pub fn pushPage(_: *Self, _: SlabClass, _: PageNum) void {
         // TODO
     }
 
-    pub fn popPage(self: *Self, slab: SlabClass) ?PageNum {
-        self.expectSlabLocked(slab);
+    pub fn popPage(_: *Self, _: SlabClass) ?PageNum {
         // TODO
         return null;
     }
 
     pub fn setMovingPage(self: *Self, slab: SlabClass, page_num: ?PageNum) void {
-        self.expectSlabLocked(slab);
         const state = self.getSlabState(slab);
         state.moving_page = page_num;
     }
 
     pub fn getMovingPage(self: *Self, slab: SlabClass) ?PageNum {
-        self.expectSlabLocked(slab);
         const state = self.getSlabState(slab);
         return state.moving_page;
     }
 
     pub fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
-        self.expectSlabLocked(slab);
         std.debug.assert(!item.slab_flags.is_present);
-
         const state = self.getSlabState(slab);
         state.free_list.pushBack(&item.lru_list);
         state.num_free += 1;
     }
 
     pub fn getFreeItem(self: *Self, slab: SlabClass) ?*Item {
-        self.expectSlabLocked(slab);
-
         const state = self.getSlabState(slab);
         const null_entry = state.free_list.popBack();
         const entry = null_entry orelse return null;
@@ -171,9 +156,7 @@ pub const ModernLru = struct {
     }
 
     pub fn deleteFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
-        self.expectSlabLocked(slab);
         std.debug.assert(!item.slab_flags.is_present);
-
         const state = self.getSlabState(slab);
         item.lru_list.remove();
         state.num_free -= 1;
@@ -181,11 +164,6 @@ pub const ModernLru = struct {
 
     fn getSlabState(self: *Self, slab: SlabClass) *SlabClassState {
         return &self._all_classes[slab.slab];
-    }
-
-    fn expectSlabLocked(self: *Self, slab: SlabClass) void {
-        const state = self.getSlabState(slab);
-        std.debug.assert(state.is_locked);
     }
 };
 

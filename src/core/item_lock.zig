@@ -42,7 +42,6 @@ pub const ItemLockService = struct {
 
     const TableEntry = struct {
         mutex: std.Io.Mutex,
-        is_locked: bool,
     };
 
     pub fn init(io: std.Io, gpa: Allocator, table_size_log: u6) !Self {
@@ -53,7 +52,6 @@ pub const ItemLockService = struct {
         for (table) |*e| {
             e.* = .{
                 .mutex = .init,
-                .is_locked = false,
             };
         }
 
@@ -80,24 +78,15 @@ pub const ItemLockService = struct {
     pub fn lock(self: *Self, slot: LockSlot) void {
         const entry = &self._table[slot.lock_slot];
         entry.mutex.lockUncancelable(self._io);
-        entry.is_locked = true;
     }
 
     pub fn tryLock(self: *Self, slot: LockSlot) bool {
         const entry = &self._table[slot.lock_slot];
-
-        const ok = entry.mutex.tryLock();
-        if (!ok) {
-            return false;
-        }
-
-        entry.is_locked = true;
-        return true;
+        return entry.mutex.tryLock();
     }
 
     pub fn unlock(self: *Self, slot: LockSlot) void {
         const entry = &self._table[slot.lock_slot];
-        entry.is_locked = false;
         entry.mutex.unlock(self._io);
     }
 
@@ -120,7 +109,7 @@ test "item lock service impl" {
 }
 
 test "table entry size" {
-    try expectEqual(8, @sizeOf(ItemLockService.TableEntry));
+    try expectEqual(4, @sizeOf(ItemLockService.TableEntry));
 }
 
 test "item lock service" {

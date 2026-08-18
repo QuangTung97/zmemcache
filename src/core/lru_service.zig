@@ -17,7 +17,6 @@ pub fn LruFuncs(T: type) type {
     return struct {
         lockSlab: fn (self: *T, slab: Slab) void,
         unlockSlab: fn (self: *T, slab: Slab) void,
-        isSlabLocked: fn (self: *T, slab: Slab) bool, // TODO remove
 
         putItem: fn (self: *T, slab: Slab, item: *Item) void,
         touchItem: fn (self: *T, slab: Slab, item: *Item) void,
@@ -40,7 +39,6 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
     return .{
         .lockSlab = T.lockSlab,
         .unlockSlab = T.unlockSlab,
-        .isSlabLocked = T.isSlabLocked,
 
         .putItem = T.putItem,
         .touchItem = T.touchItem,
@@ -147,7 +145,6 @@ pub const FakeLruService = struct {
         std.debug.assert(ok);
     }
 
-    // TODO remove
     pub fn isSlabLocked(self: *Self, slab: Slab) bool {
         return self.locked_set.contains(slab);
     }
@@ -270,18 +267,18 @@ test "lock & unlock" {
     const slab1 = Slab{ .slab = 21 };
     const slab2 = Slab{ .slab = 22 };
 
-    try expectEqual(false, s.isSlabLocked(&fake, slab1));
-    try expectEqual(false, s.isSlabLocked(&fake, slab2));
+    try expectEqual(false, fake.isSlabLocked(slab1));
+    try expectEqual(false, fake.isSlabLocked(slab2));
 
     // lock
     s.lockSlab(&fake, slab1);
 
-    try expectEqual(true, s.isSlabLocked(&fake, slab1));
-    try expectEqual(false, s.isSlabLocked(&fake, slab2));
+    try expectEqual(true, fake.isSlabLocked(slab1));
+    try expectEqual(false, fake.isSlabLocked(slab2));
 
     // unlock
     s.unlockSlab(&fake, slab1);
-    try expectEqual(false, s.isSlabLocked(&fake, slab1));
+    try expectEqual(false, fake.isSlabLocked(slab1));
 }
 
 fn newItem(v: u64) Item {

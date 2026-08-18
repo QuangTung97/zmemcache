@@ -94,8 +94,12 @@ pub const AtomicFlags = struct {
 };
 
 pub const RefCount = struct {
-    refcount: u32,
-    pub fn init(x: u32) @This() {
+    const IntType = u16;
+    const MaxIntValue = std.math.maxInt(IntType);
+
+    refcount: IntType,
+
+    pub fn init(x: IntType) @This() {
         return .{ .refcount = x };
     }
 };
@@ -114,12 +118,10 @@ pub const Item = struct {
 
     slab_flags: SlabFlags, // protected by slab lock
     item_flags: ItemFlags, // protected by item lock
+    atomic_flags: AtomicFlags,
 
     key_len: u8, // constant
     slab: SlabClass, // constant
-
-    atomic_flags: AtomicFlags,
-
     refcount: RefCount, // protected by item lock
     value_len: u32, // constant
 
@@ -333,6 +335,7 @@ test "check item size" {
     try expectEqual(1, @sizeOf(ItemFlags));
     try expectEqual(8, @sizeOf(CasNum));
     try expectEqual(8 * 6, Item.Size);
+    try expectEqual(48, Item.Size);
     try expectEqual(std.mem.Alignment.@"8", Item.Alignment);
 
     try expectEqual(true, Item.Alignment.check(16));
@@ -340,6 +343,10 @@ test "check item size" {
     try expectEqual(false, Item.Alignment.check(19));
     try expectEqual(false, Item.Alignment.check(20));
     try expectEqual(true, Item.Alignment.check(24));
+
+    // check refcount size
+    try expectEqual(2, @sizeOf(RefCount));
+    try expectEqual(65535, RefCount.MaxIntValue);
 }
 
 test "slab class" {

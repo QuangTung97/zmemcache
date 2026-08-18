@@ -130,20 +130,20 @@ pub const ItemGetter = union(enum) {
 };
 
 const LockCtx = struct {
-    slots: [2]?LockSlot,
-    slab: ?SlabClass,
+    _slots: [2]?LockSlot,
+    _slab: ?SlabClass,
 
     const Self = @This();
 
     fn init() Self {
         return .{
-            .slots = .{ null, null },
-            .slab = null,
+            ._slots = .{ null, null },
+            ._slab = null,
         };
     }
 
     fn addSlot(self: *Self, slot: LockSlot) void {
-        for (self.slots[0..]) |*x| {
+        for (self._slots[0..]) |*x| {
             if (x.* == null) {
                 x.* = slot;
                 return;
@@ -154,7 +154,7 @@ const LockCtx = struct {
     }
 
     fn removeSlot(self: *Self, slot: LockSlot) void {
-        for (self.slots[0..]) |*x| {
+        for (self._slots[0..]) |*x| {
             std.debug.assert(x.* != null);
             if (slot.nullEqual(x.*)) {
                 x.* = null;
@@ -165,7 +165,7 @@ const LockCtx = struct {
     }
 
     fn containSlot(self: *Self, slot: LockSlot) bool {
-        for (self.slots[0..]) |x| {
+        for (self._slots[0..]) |x| {
             if (slot.nullEqual(x)) {
                 return true;
             }
@@ -174,13 +174,17 @@ const LockCtx = struct {
     }
 
     fn addSlab(self: *Self, slab: SlabClass) void {
-        std.debug.assert(self.slab == null);
-        self.slab = slab;
+        std.debug.assert(self._slab == null);
+        self._slab = slab;
     }
 
     fn removeSlab(self: *Self, slab: SlabClass) void {
-        std.debug.assert(slab.nullEqual(self.slab));
-        self.slab = null;
+        std.debug.assert(slab.nullEqual(self._slab));
+        self._slab = null;
+    }
+
+    fn isSlabLocked(self: *Self, slab: SlabClass) bool {
+        return slab.nullEqual(self._slab);
     }
 };
 
@@ -673,7 +677,7 @@ pub fn ItemService(
             }
 
             const slab = deleted_item.slab;
-            if (slab.nullEqual(ctx.slab)) {
+            if (ctx.isSlabLocked(slab)) {
                 // if slab already locked
                 self.doMoveItemFromLruToFree(ctx, deleted_item);
             } else {
@@ -735,7 +739,7 @@ pub fn ItemService(
         }
 
         fn assertSlabLocked(_: *Self, ctx: *LockCtx, slab: SlabClass) void {
-            std.debug.assert(slab.nullEqual(ctx.slab));
+            std.debug.assert(ctx.isSlabLocked(slab));
         }
 
         fn nextCasNum(self: *Self) CasNum {

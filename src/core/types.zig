@@ -110,7 +110,7 @@ pub const Item = struct {
     key_len: u8, // constant
     slab: SlabClass, // constant
 
-    is_touched: std.atomic.Value(bool), // set = true when touched TODO update
+    atomic_flags: AtomicFlags,
 
     refcount: RefCount, // protected by item lock
     value_len: u32, // constant
@@ -129,7 +129,7 @@ pub const Item = struct {
             .item_flags = ItemFlags{
                 .set_partial = false,
             },
-            .is_touched = .init(false),
+            .atomic_flags = .init(),
             .hash_next = null,
             .lru_list = undefined,
             .refcount = RefCount.init(1),

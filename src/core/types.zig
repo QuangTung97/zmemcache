@@ -191,8 +191,16 @@ pub const HashValue = struct {
 
 pub const LockSlot = struct {
     lock_slot: u64,
-    pub fn init(x: u64) @This() {
+
+    const Self = @This();
+
+    pub fn init(x: u64) Self {
         return .{ .lock_slot = x };
+    }
+
+    pub fn nullEqual(self: Self, other: ?Self) bool {
+        const other_val = other orelse return false;
+        return self.lock_slot == other_val.lock_slot;
     }
 };
 

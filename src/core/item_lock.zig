@@ -11,7 +11,7 @@ pub fn ItemLockFuncs(T: type) type {
         getTableSize: fn (self: *const T) LockSlot,
         getSlot: fn (self: *const T, hash: HashValue) LockSlot,
         lock: fn (self: *T, slot: LockSlot) void,
-        isLocked: fn (self: *const T, slot: LockSlot) bool,
+        isLocked: fn (self: *const T, slot: LockSlot) bool, // TODO remove
         tryLock: fn (self: *T, slot: LockSlot) bool,
         unlock: fn (self: *T, slot: LockSlot) void,
     };
@@ -103,6 +103,7 @@ pub const ItemLockService = struct {
         entry.mutex.unlock(self._io);
     }
 
+    // TODO remove
     pub fn isLocked(self: *const Self, slot: LockSlot) bool {
         const entry = &self._table[slot.lock_slot];
         return entry.is_locked;

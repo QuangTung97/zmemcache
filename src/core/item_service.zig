@@ -129,6 +129,51 @@ pub const ItemGetter = union(enum) {
     SetPartial: struct {},
 };
 
+const LockCtx = struct {
+    slots: [2]?LockSlot,
+    slab: ?SlabClass,
+
+    const Self = @This();
+
+    fn init() Self {
+        return .{
+            .slots = .{ null, null },
+            .slab = null,
+        };
+    }
+
+    fn addSlot(self: *Self, slot: LockSlot) void {
+        for (self.slots[0..]) |*x| {
+            if (x.* == null) {
+                x.* = slot;
+                return;
+            }
+            std.debug.assert(!slot.nullEqual(x.*));
+        }
+        @panic("no slot to add");
+    }
+
+    fn removeSlot(self: *Self, slot: LockSlot) void {
+        for (self.slots[0..]) |*x| {
+            std.debug.assert(x.* != null);
+            if (slot.nullEqual(x.*)) {
+                x.* = null;
+                return;
+            }
+        }
+        @panic("no slot to remove");
+    }
+
+    fn containSlot(self: *Self, slot: LockSlot) bool {
+        for (self.slots[0..]) |x| {
+            if (slot.nullEqual(x)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
 pub fn ItemService(
     H: type,
     L: type,
@@ -197,6 +242,25 @@ pub fn ItemService(
             self._table.deinit();
         }
 
+        fn lockSlot(self: *Self, ctx: *LockCtx, slot: LockSlot) void {
+            ItemLocks.lock(self._locker, slot);
+            ctx.addSlot(slot);
+        }
+
+        fn tryLockSlot(self: *Self, ctx: *LockCtx, slot: LockSlot) bool {
+            const ok = ItemLocks.tryLock(self._locker, slot);
+            if (!ok) {
+                return false;
+            }
+            ctx.addSlot(slot);
+            return true;
+        }
+
+        fn unlockSlot(self: *Self, ctx: *LockCtx, slot: LockSlot) void {
+            ctx.removeSlot(slot);
+            ItemLocks.unlock(self._locker, slot);
+        }
+
         pub fn put(self: *Self, key: String, value_len: usize) ?ItemSetter {
             // compute hash value & lock slot
             const hash_value = HashFunc.hashKey(self._hasher, key);
@@ -208,14 +272,15 @@ pub fn ItemService(
             const slab = slab_size.slab_class;
 
             // lock with item locks
-            ItemLocks.lock(self._locker, lock_slot);
-            defer ItemLocks.unlock(self._locker, lock_slot);
+            var ctx = LockCtx.init();
+            self.lockSlot(&ctx, lock_slot);
+            defer self.unlockSlot(&ctx, lock_slot);
 
             // delete previous item
-            const prev_pitem = self.findItemPointerWithKey(hash_value, key);
+            const prev_pitem = self.findItemPointerWithKey(&ctx, hash_value, key);
             const null_prev_item = prev_pitem.*;
             if (null_prev_item) |prev_item| {
-                self.doDeleteItem(hash_value, prev_item, prev_pitem);
+                self.doDeleteItem(&ctx, hash_value, prev_item, prev_pitem);
             }
 
             // lock slab
@@ -223,7 +288,7 @@ pub fn ItemService(
             defer LruFuncs.unlockSlab(self._lru, slab);
 
             // try to get free item
-            const null_item = self.getFreeItem(slab_size, lock_slot);
+            const null_item = self.getFreeItem(&ctx, slab_size, lock_slot);
             const it = null_item orelse return null;
 
             // init item
@@ -253,11 +318,12 @@ pub fn ItemService(
             const slot = ItemLocks.getSlot(self._locker, setter.hash);
 
             // lock item
-            ItemLocks.lock(self._locker, slot);
-            defer ItemLocks.unlock(self._locker, slot);
+            var ctx = LockCtx.init();
+            self.lockSlot(&ctx, slot);
+            defer self.unlockSlot(&ctx, slot);
 
             setter.item.item_flags.set_partial = false;
-            self.decreaseRefcountAndDelete(setter.hash, setter.item);
+            self.decreaseRefcountAndDelete(&ctx, setter.hash, setter.item);
         }
 
         pub fn get(self: *Self, key: String) ItemGetter {
@@ -266,10 +332,11 @@ pub fn ItemService(
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
             // lock item
-            ItemLocks.lock(self._locker, lock_slot);
-            defer ItemLocks.unlock(self._locker, lock_slot);
+            var ctx = LockCtx.init();
+            self.lockSlot(&ctx, lock_slot);
+            defer self.unlockSlot(&ctx, lock_slot);
 
-            const pitem = self.findItemPointerWithKey(hash_value, key);
+            const pitem = self.findItemPointerWithKey(&ctx, hash_value, key);
             const null_item = pitem.*;
             const it = null_item orelse return .{ .NotFound = .{} };
 
@@ -293,10 +360,11 @@ pub fn ItemService(
             const lock_slot = ItemLocks.getSlot(self._locker, found.hash);
 
             // lock item
-            ItemLocks.lock(self._locker, lock_slot);
-            defer ItemLocks.unlock(self._locker, lock_slot);
+            var ctx = LockCtx.init();
+            self.lockSlot(&ctx, lock_slot);
+            defer self.unlockSlot(&ctx, lock_slot);
 
-            self.decreaseRefcountAndDelete(found.hash, found.item);
+            self.decreaseRefcountAndDelete(&ctx, found.hash, found.item);
         }
 
         pub fn delete(self: *Self, key: String) void {
@@ -305,14 +373,15 @@ pub fn ItemService(
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
             // lock item
-            ItemLocks.lock(self._locker, lock_slot);
-            defer ItemLocks.unlock(self._locker, lock_slot);
+            var ctx = LockCtx.init();
+            self.lockSlot(&ctx, lock_slot);
+            defer self.unlockSlot(&ctx, lock_slot);
 
-            const pitem = self.findItemPointerWithKey(hash_value, key);
+            const pitem = self.findItemPointerWithKey(&ctx, hash_value, key);
             const null_item = pitem.*;
             const it = null_item orelse return;
 
-            self.doDeleteItem(hash_value, it, pitem);
+            self.doDeleteItem(&ctx, hash_value, it, pitem);
         }
 
         pub fn startMovePage(self: *Self, from_slab: SlabClass, gpa: Allocator, delete_list: *ItemHashList) ?PageNum {
@@ -370,16 +439,17 @@ pub fn ItemService(
             const hash_value = item_hash.hash;
             const lock_slot = ItemLocks.getSlot(self._locker, hash_value);
 
-            // lock the item
-            ItemLocks.lock(self._locker, lock_slot);
-            defer ItemLocks.unlock(self._locker, lock_slot);
+            // lock item
+            var ctx = LockCtx.init();
+            self.lockSlot(&ctx, lock_slot);
+            defer self.unlockSlot(&ctx, lock_slot);
 
-            const pitem = self.findItemPointerInBucket(hash_value, item_hash.item);
+            const pitem = self.findItemPointerInBucket(&ctx, hash_value, item_hash.item);
             const null_item = pitem.*;
             const item = null_item orelse return;
 
             std.debug.assert(item.slab_flags.is_present);
-            self.doDeleteItem(hash_value, item, pitem);
+            self.doDeleteItem(&ctx, hash_value, item, pitem);
         }
 
         pub fn removePageFrom(self: *Self, from_slab: SlabClass) void {
@@ -412,7 +482,7 @@ pub fn ItemService(
             self.addFreePageToSlab(to_slab, item_size, page);
         }
 
-        fn getFreeItem(self: *Self, slab: SlabSize, lock_slot: LockSlot) ?*Item {
+        fn getFreeItem(self: *Self, ctx: *LockCtx, slab: SlabSize, lock_slot: LockSlot) ?*Item {
             self.assertSlabLocked(slab.slab_class);
 
             const null_item1 = LruFuncs.getFreeItem(self._lru, slab.slab_class);
@@ -429,7 +499,7 @@ pub fn ItemService(
             }
 
             // evict from lru if no free item exists
-            self.evictFromLru(slab.slab_class, lock_slot);
+            self.evictFromLru(ctx, slab.slab_class, lock_slot);
 
             return LruFuncs.getFreeItem(self._lru, slab.slab_class);
         }
@@ -477,15 +547,22 @@ pub fn ItemService(
             LruFuncs.pushPage(self._lru, slab_class, page_num);
         }
 
-        fn evictFromLru(self: *Self, slab: SlabClass, current_slot: LockSlot) void {
+        fn evictFromLru(
+            self: *Self,
+            lock_ctx: *LockCtx,
+            slab: SlabClass,
+            current_slot: LockSlot,
+        ) void {
             self.assertSlabLocked(slab);
 
             var ctx = struct {
                 self: *Self,
+                lock_ctx: *LockCtx,
                 current_slot: LockSlot,
                 num_attempts: usize,
                 pub fn yield(ctx: *@This(), item: *Item) bool {
                     const ok = ctx.self.tryToEvictItem(
+                        ctx.lock_ctx,
                         item,
                         ctx.current_slot,
                     );
@@ -498,6 +575,7 @@ pub fn ItemService(
                 }
             }{
                 .self = self,
+                .lock_ctx = lock_ctx,
                 .current_slot = current_slot,
                 .num_attempts = 0,
             };
@@ -512,7 +590,7 @@ pub fn ItemService(
             std.debug.assert(ctx.num_attempts <= self._max_evict_attempts);
         }
 
-        fn tryToEvictItem(self: *Self, evicted_item: *Item, current_slot: LockSlot) bool {
+        fn tryToEvictItem(self: *Self, ctx: *LockCtx, evicted_item: *Item, current_slot: LockSlot) bool {
             const slab = evicted_item.slab;
             self.assertSlabLocked(slab);
 
@@ -521,49 +599,49 @@ pub fn ItemService(
 
             // do not lock if lock slot the same
             if (current_slot.lock_slot == new_slot.lock_slot) {
-                return self.checkEvictCondAndDeleteItem(new_hash, evicted_item);
+                return self.checkEvictCondAndDeleteItem(ctx, new_hash, evicted_item);
             }
 
             // try to lock the evicted item
-            const locked = ItemLocks.tryLock(self._locker, new_slot);
+            const locked = self.tryLockSlot(ctx, new_slot);
             if (!locked) {
                 return false;
             }
-            defer ItemLocks.unlock(self._locker, new_slot);
+            defer self.unlockSlot(ctx, new_slot);
 
-            return self.checkEvictCondAndDeleteItem(new_hash, evicted_item);
+            return self.checkEvictCondAndDeleteItem(ctx, new_hash, evicted_item);
         }
 
-        fn checkEvictCondAndDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item) bool {
-            self.assertItemLocked(hash);
+        fn checkEvictCondAndDeleteItem(self: *Self, ctx: *LockCtx, hash: HashValue, deleted_item: *Item) bool {
+            self.assertItemLocked(ctx, hash);
 
             if (deleted_item.refcount.refcount != 1) {
                 return false;
             }
 
-            const pitem = self.findItemPointerInBucket(hash, .init(deleted_item));
+            const pitem = self.findItemPointerInBucket(ctx, hash, .init(deleted_item));
             const null_item = pitem.*;
             if (null_item == null) {
                 return false;
             }
 
-            self.doDeleteItem(hash, deleted_item, pitem);
+            self.doDeleteItem(ctx, hash, deleted_item, pitem);
             return true;
         }
 
-        fn doDeleteItem(self: *Self, hash: HashValue, deleted_item: *Item, pitem: *NullItem) void {
-            self.assertItemLocked(hash);
+        fn doDeleteItem(self: *Self, ctx: *LockCtx, hash: HashValue, deleted_item: *Item, pitem: *NullItem) void {
+            self.assertItemLocked(ctx, hash);
 
             // unlink from bucket
             const next = deleted_item.hash_next;
             pitem.* = next;
 
             // try to remove from lru
-            self.decreaseRefcountAndDelete(hash, deleted_item);
+            self.decreaseRefcountAndDelete(ctx, hash, deleted_item);
         }
 
-        fn decreaseRefcountAndDelete(self: *Self, hash: HashValue, deleted_item: *Item) void {
-            self.assertItemLocked(hash);
+        fn decreaseRefcountAndDelete(self: *Self, ctx: *LockCtx, hash: HashValue, deleted_item: *Item) void {
+            self.assertItemLocked(ctx, hash);
 
             deleted_item.refcount.refcount -= 1;
             if (deleted_item.refcount.refcount > 0) {
@@ -600,8 +678,8 @@ pub fn ItemService(
             }
         }
 
-        fn findItemPointerInBucket(self: *Self, hash: HashValue, find_item: ItemOpaquePtr) *NullItem {
-            self.assertItemLocked(hash);
+        fn findItemPointerInBucket(self: *Self, ctx: *LockCtx, hash: HashValue, find_item: ItemOpaquePtr) *NullItem {
+            self.assertItemLocked(ctx, hash);
 
             var pitem = self._table.getBucket(hash);
             while (pitem.*) |it| {
@@ -613,8 +691,8 @@ pub fn ItemService(
             return pitem;
         }
 
-        fn findItemPointerWithKey(self: *Self, hash: HashValue, key: String) *NullItem {
-            self.assertItemLocked(hash);
+        fn findItemPointerWithKey(self: *Self, ctx: *LockCtx, hash: HashValue, key: String) *NullItem {
+            self.assertItemLocked(ctx, hash);
 
             var pitem = self._table.getBucket(hash);
             while (pitem.*) |it| {
@@ -626,9 +704,9 @@ pub fn ItemService(
             return pitem;
         }
 
-        fn assertItemLocked(self: *Self, hash: HashValue) void {
+        fn assertItemLocked(self: *Self, ctx: *LockCtx, hash: HashValue) void {
             const slot = ItemLocks.getSlot(self._locker, hash);
-            std.debug.assert(ItemLocks.isLocked(self._locker, slot));
+            std.debug.assert(ctx.containSlot(slot));
         }
 
         fn assertSlabLocked(self: *Self, slab: SlabClass) void {
@@ -647,6 +725,41 @@ pub fn ItemService(
 // ===========================================================================
 
 const expectEqual = std.testing.expectEqual;
+
+test "lock context" {
+    var ctx = LockCtx.init();
+
+    const slot1 = LockSlot.init(11);
+    const slot2 = LockSlot.init(12);
+
+    try expectEqual(false, ctx.containSlot(slot1));
+    try expectEqual(false, ctx.containSlot(slot2));
+
+    ctx.addSlot(slot1);
+    try expectEqual(true, ctx.containSlot(slot1));
+    try expectEqual(false, ctx.containSlot(slot2));
+
+    ctx.removeSlot(slot1);
+    try expectEqual(false, ctx.containSlot(slot1));
+    try expectEqual(false, ctx.containSlot(slot2));
+}
+
+test "lock context, nested slots" {
+    var ctx = LockCtx.init();
+
+    const slot1 = LockSlot.init(11);
+    const slot2 = LockSlot.init(12);
+
+    ctx.addSlot(slot1);
+    ctx.addSlot(slot2);
+    try expectEqual(true, ctx.containSlot(slot1));
+    try expectEqual(true, ctx.containSlot(slot2));
+
+    ctx.removeSlot(slot2);
+    ctx.removeSlot(slot1);
+    try expectEqual(false, ctx.containSlot(slot1));
+    try expectEqual(false, ctx.containSlot(slot2));
+}
 
 test "hash table" {
     try expectEqual(8 * 5, @sizeOf(HashTable));
@@ -806,10 +919,12 @@ const ServiceTest = struct {
         const hash_value = HashFunc.hashKey(self.svc._hasher, key);
         const lock_slot = ItemLocks.getSlot(self.svc._locker, hash_value);
 
-        ItemLocks.lock(self.svc._locker, lock_slot);
-        defer ItemLocks.unlock(self.svc._locker, lock_slot);
+        // lock item
+        var ctx = LockCtx.init();
+        self.svc.lockSlot(&ctx, lock_slot);
+        defer self.svc.unlockSlot(&ctx, lock_slot);
 
-        const pitem = self.svc.findItemPointerWithKey(hash_value, key);
+        const pitem = self.svc.findItemPointerWithKey(&ctx, hash_value, key);
         const null_item = pitem.*;
         const item = null_item.?;
         const slab = item.slab;
@@ -817,7 +932,7 @@ const ServiceTest = struct {
         LruFuncs.lockSlab(self.svc._lru, slab);
         defer LruFuncs.unlockSlab(self.svc._lru, slab);
 
-        return self.svc.tryToEvictItem(item, lock_slot);
+        return self.svc.tryToEvictItem(&ctx, item, lock_slot);
     }
 
     fn tryEvictKeyItem(self: *Self, item: *Item) bool {
@@ -826,15 +941,16 @@ const ServiceTest = struct {
         const lock_slot = ItemLocks.getSlot(self.svc._locker, hash_value);
 
         // lock item
-        ItemLocks.lock(self.svc._locker, lock_slot);
-        defer ItemLocks.unlock(self.svc._locker, lock_slot);
+        var ctx = LockCtx.init();
+        self.svc.lockSlot(&ctx, lock_slot);
+        defer self.svc.unlockSlot(&ctx, lock_slot);
 
         // lock slab
         const slab = item.slab;
         LruFuncs.lockSlab(self.svc._lru, slab);
         defer LruFuncs.unlockSlab(self.svc._lru, slab);
 
-        return self.svc.tryToEvictItem(item, lock_slot);
+        return self.svc.tryToEvictItem(&ctx, item, lock_slot);
     }
 
     fn startMovePage(self: *Self, slab: SlabClass) PageNum {

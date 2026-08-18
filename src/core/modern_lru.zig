@@ -99,6 +99,7 @@ pub const ModernLru = struct {
     }
 
     pub fn unlockSlab(self: *Self, slab: SlabClass) void {
+        self.expectSlabLocked(slab);
         const state = self.getSlabState(slab);
         state.is_locked = false;
         state.mutex.unlock(self._io);

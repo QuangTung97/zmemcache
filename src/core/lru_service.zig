@@ -17,7 +17,7 @@ pub fn LruFuncs(T: type) type {
     return struct {
         lockSlab: fn (self: *T, slab: Slab) void,
         unlockSlab: fn (self: *T, slab: Slab) void,
-        isSlabLocked: fn (self: *T, slab: Slab) bool,
+        isSlabLocked: fn (self: *T, slab: Slab) bool, // TODO remove
 
         putItem: fn (self: *T, slab: Slab, item: *Item) void,
         touchItem: fn (self: *T, slab: Slab, item: *Item) void,
@@ -147,6 +147,7 @@ pub const FakeLruService = struct {
         std.debug.assert(ok);
     }
 
+    // TODO remove
     pub fn isSlabLocked(self: *Self, slab: Slab) bool {
         return self.locked_set.contains(slab);
     }

@@ -5,6 +5,7 @@ const zutil = @import("zutil");
 const Item = types.Item;
 const SlabClass = types.SlabClass;
 const CachePadding = types.CachePadding;
+const ListHead = zutil.ListHead;
 
 const ItemAlignBytes = Item.Alignment.toByteUnits();
 
@@ -34,7 +35,7 @@ pub const GlobalPager = struct {
     const AtomicSlab = std.atomic.Value(u64);
 
     priv: struct {
-        _before_caching: CachePadding = undefined,
+        _before_padding: CachePadding = undefined,
         io: std.Io,
         gpa: std.mem.Allocator,
 
@@ -45,6 +46,8 @@ pub const GlobalPager = struct {
         num_empty_pages: std.atomic.Value(u64),
         mut: std.Io.Mutex,
         pages_to_slab: []AtomicSlab,
+        all_page_heads: []ListHead,
+
         _after_padding: CachePadding = undefined,
     },
 
@@ -82,6 +85,9 @@ pub const GlobalPager = struct {
             x.* = .init(AtomicSlabNull);
         }
 
+        // init all page list heads
+        const all_page_heads = try gpa.alloc(ListHead, num_pages);
+
         return .{
             .priv = .{
                 .io = io,
@@ -92,11 +98,13 @@ pub const GlobalPager = struct {
                 .num_empty_pages = .init(num_pages),
                 .mut = .init,
                 .pages_to_slab = pages_to_slab,
+                .all_page_heads = all_page_heads,
             },
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.priv.gpa.free(self.priv.all_page_heads);
         self.priv.gpa.free(self.priv.all_pages);
         self.priv.gpa.free(self.priv.pages_to_slab);
     }
@@ -225,6 +233,10 @@ pub const GlobalPager = struct {
             ._index = 0,
             ._pager = self,
         };
+    }
+
+    pub fn getPageListHead(self: *Self, num: PageNum) *ListHead {
+        return &self.priv.all_page_heads[num.page_num];
     }
 };
 

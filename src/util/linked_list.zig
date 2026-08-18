@@ -39,6 +39,11 @@ pub const ListHead = struct {
         self.prev = self;
     }
 
+    pub fn validateInit(self: *Self) void {
+        std.debug.assert(self.prev == self);
+        std.debug.assert(self.next == self);
+    }
+
     pub fn pushBack(head: *Self, item: *ListHead) void {
         const last = head.prev;
         last.next = item;

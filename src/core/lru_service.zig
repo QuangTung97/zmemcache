@@ -52,8 +52,8 @@ pub fn NewLruFuncs(T: type) LruFuncs(T) {
         .pushPage = T.pushPage,
         .popPage = T.popPage,
 
-        .setMovingPage =  T.setMovingPage,
-        .getMovingPage =  T.getMovingPage,
+        .setMovingPage = T.setMovingPage,
+        .getMovingPage = T.getMovingPage,
     };
 }
 
@@ -133,10 +133,14 @@ pub const FakeLruService = struct {
 
     pub fn lockSlab(self: *Self, slab: Slab) void {
         std.debug.assert(!self.locked_set.contains(slab));
+        std.debug.assert(self.locked_set.count() == 0); // not allow concurrent slab locks
+
         self.locked_set.put(slab, .{}) catch unreachable;
     }
 
     pub fn unlockSlab(self: *Self, slab: Slab) void {
+        std.debug.assert(self.locked_set.contains(slab));
+
         const ok = self.locked_set.remove(slab);
         std.debug.assert(ok);
     }

@@ -210,16 +210,16 @@ pub fn ItemService(
             ItemLocks.lock(self._locker, lock_slot);
             defer ItemLocks.unlock(self._locker, lock_slot);
 
-            // lock slab
-            LruFuncs.lockSlab(self._lru, slab);
-            defer LruFuncs.unlockSlab(self._lru, slab);
-
             // delete previous item
             const prev_pitem = self.findItemPointerWithKey(hash_value, key);
             const null_prev_item = prev_pitem.*;
             if (null_prev_item) |prev_item| {
                 self.doDeleteItem(hash_value, prev_item, prev_pitem);
             }
+
+            // lock slab
+            LruFuncs.lockSlab(self._lru, slab);
+            defer LruFuncs.unlockSlab(self._lru, slab);
 
             // try to get free item
             const null_item = self.getFreeItem(slab_size, lock_slot);
@@ -1543,4 +1543,20 @@ test "put and then update value" {
     const getter1 = s.get(key01);
     try std.testing.expectEqualStrings("123xy", getter1.Found.item.getValue());
     s.finishGet(getter1.Found);
+}
+
+test "put and then update value, different slab size" {
+    const s = try ServiceTest.init(.{ .num_pages = 2 });
+    defer s.deinit();
+
+    // slab 0
+    const setter1 = s.put(key01, 4).?;
+    s.finishPut(setter1);
+
+    // slab 1
+    const setter2 = s.put(key01, test_val_len).?;
+    s.finishPut(setter2);
+
+    const getter1 = s.get(key01);
+    try expectEqual(test_val_len, getter1.Found.item.getValue().len);
 }

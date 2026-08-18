@@ -119,9 +119,19 @@ pub const ModernLru = struct {
         const entry = null_entry orelse return null;
 
         const item = Item.fromList(entry);
+        std.debug.assert(!item.slab_flags.is_present);
         state.num_free -= 1;
 
         return item;
+    }
+
+    pub fn deleteFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+        self.expectSlabLocked(slab);
+        std.debug.assert(!item.slab_flags.is_present);
+
+        const state = self.getSlabState(slab);
+        item.lru_list.remove();
+        state.num_free -= 1;
     }
 
     fn getSlabState(self: *Self, slab: SlabClass) *SlabClassState {
@@ -171,17 +181,15 @@ const ServiceTest = struct {
     }
 
     fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+        defer self.checkInvariant();
         self.svc.lockSlab(slab);
         defer self.svc.unlockSlab(slab);
 
         self.svc.putFreeItem(slab, item);
-
-        self.checkInvariant();
     }
 
     fn getFreeItem(self: *Self, slab: SlabClass) ?u64 {
         defer self.checkInvariant();
-
         self.svc.lockSlab(slab);
         defer self.svc.unlockSlab(slab);
 
@@ -191,6 +199,14 @@ const ServiceTest = struct {
         }
 
         return null;
+    }
+
+    fn deleteFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+        defer self.checkInvariant();
+        self.svc.lockSlab(slab);
+        defer self.svc.unlockSlab(slab);
+
+        self.svc.deleteFreeItem(slab, item);
     }
 
     fn checkInvariant(_: *Self) void {}
@@ -252,4 +268,32 @@ test "free list" {
     try expectEqual(null, s.getFreeItem(slab1));
     try expectEqual(0, s.svc.getSlabState(slab1).num_free);
     try expectEqual(1, s.svc.getSlabState(slab2).num_free);
+}
+
+test "free list, with delete" {
+    var s = try ServiceTest.init();
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    var item1 = s.newFreeItem(11);
+    var item2 = s.newFreeItem(12);
+    var item3 = s.newFreeItem(13);
+
+    // put
+    s.putFreeItem(slab1, &item1);
+    s.putFreeItem(slab1, &item2);
+    s.putFreeItem(slab1, &item3);
+
+    try expectEqual(3, s.svc.getSlabState(slab1).num_free);
+
+    // delete middle
+    s.deleteFreeItem(slab1, &item2);
+    try expectEqual(2, s.svc.getSlabState(slab1).num_free);
+
+    // get all
+    try expectEqual(13, s.getFreeItem(slab1));
+    try expectEqual(11, s.getFreeItem(slab1));
+    try expectEqual(null, s.getFreeItem(slab1));
+    try expectEqual(0, s.svc.getSlabState(slab1).num_free);
 }

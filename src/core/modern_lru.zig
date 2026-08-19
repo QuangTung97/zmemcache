@@ -38,16 +38,21 @@ pub const ModernLru = struct {
     _gpa: Allocator,
     _all_classes: []SlabClassState,
     _pager: *zpage.GlobalPager,
+    _conf: Config,
+
+    const Config = struct {
+        num_classes: usize,
+        hot_ratio: f64,
+    };
 
     pub fn init(
         io: std.Io,
         gpa: Allocator,
         pager: *zpage.GlobalPager,
-        num_classes: usize,
+        conf: Config,
     ) !Self {
-        zutil.runtimeAssert(num_classes <= SlabClass.MaxNumClass);
-
-        const all_classes = try gpa.alloc(SlabClassState, num_classes);
+        zutil.runtimeAssert(conf.num_classes <= SlabClass.MaxNumClass);
+        const all_classes = try gpa.alloc(SlabClassState, conf.num_classes);
         for (all_classes) |*s| {
             s.* = .{
                 .mutex = .init,
@@ -85,6 +90,7 @@ pub const ModernLru = struct {
             ._gpa = gpa,
             ._all_classes = all_classes,
             ._pager = pager,
+            ._conf = conf,
         };
     }
 
@@ -112,7 +118,8 @@ pub const ModernLru = struct {
         std.debug.assert(item.slab_flags.is_present);
 
         const state = self.getSlabState(slab);
-        state.cold_list.pushBack(&item.lru_list);
+        pushToList(&state.hot_list, &state.num_hot, &item.lru_list);
+        self.rebalanceLruLists(state);
     }
 
     pub fn touchItem(_: *Self, _: SlabClass, item: *Item) void {
@@ -126,6 +133,30 @@ pub const ModernLru = struct {
 
     pub fn iterateItems(_: *Self, _: SlabClass, _: ItemIter) void {
         // TODO
+    }
+
+    fn rebalanceLruLists(self: *Self, state: *SlabClassState) void {
+        const total_int = state.num_hot + state.num_warm + state.num_cold;
+        const total: f64 = @floatFromInt(total_int);
+
+        const expected_hot: usize = @floor(total * self._conf.hot_ratio);
+        while (state.num_hot > expected_hot) {
+            const entry = popFromList(&state.hot_list, &state.num_hot).?;
+            pushToList(&state.cold_list, &state.num_cold, entry);
+        }
+    }
+
+    fn pushToList(head: *ListHead, counter: *usize, entry: *ListHead) void {
+        head.pushFront(entry);
+        counter.* += 1;
+    }
+
+    fn popFromList(head: *ListHead, counter: *usize) ?*ListHead {
+        const null_entry = head.popBack();
+        const entry = null_entry orelse return null;
+
+        counter.* -= 1;
+        return entry;
     }
 
     pub fn pushPage(self: *Self, slab: SlabClass, page_num: PageNum) void {
@@ -198,16 +229,22 @@ const ServiceTest = struct {
     pager: *zpage.GlobalPager,
     svc: ModernLru,
 
-    const Config = struct {};
+    const Config = struct {
+        num_classes: usize = 5,
+        hot_ratio: f64 = 0.2,
+    };
 
-    fn init(_: Config) !*Self {
+    fn init(conf: Config) !*Self {
         const io = std.testing.io;
         const gpa = std.testing.allocator;
 
         const s = try gpa.create(Self);
 
         s.pager = try zpage.GlobalPager.init(io, gpa, 10, 20);
-        s.svc = try ModernLru.init(io, gpa, s.pager, 5);
+        s.svc = try ModernLru.init(io, gpa, s.pager, .{
+            .num_classes = conf.num_classes,
+            .hot_ratio = conf.hot_ratio,
+        });
 
         return s;
     }
@@ -249,11 +286,20 @@ const ServiceTest = struct {
         try expectCasList(self, &state.cold_list, cas_list);
     }
 
-    fn expectCasList(_: *Self, head: *ListHead, cas_list: TestCasList) !void {
+    fn expectCasList(self: *Self, head: *ListHead, cas_list: TestCasList) !void {
+        const gpa = std.testing.allocator;
+
+        var list = try self.getCasOfListHead(head);
+        defer list.deinit(gpa);
+
+        try std.testing.expectEqualSlices(u64, cas_list, list.items);
+    }
+
+    fn getCasOfListHead(_: *Self, head: *ListHead) !std.ArrayList(u64) {
         const gpa = std.testing.allocator;
 
         var list = std.ArrayList(u64).empty;
-        defer list.deinit(gpa);
+        errdefer list.deinit(gpa);
 
         var iter = head.iterate();
         while (iter.next()) |x| {
@@ -261,7 +307,7 @@ const ServiceTest = struct {
             try list.append(gpa, item.cas_num.cas);
         }
 
-        try std.testing.expectEqualSlices(u64, cas_list, list.items);
+        return list;
     }
 
     fn newFreeItem(_: *Self, cas: u64) Item {
@@ -460,5 +506,29 @@ test "lru, all to cold" {
 
     try s.expectHotList(slab1, &.{});
     try s.expectWarmList(slab1, &.{});
-    try s.expectColdList(slab1, &.{31, 32, 33});
+    try s.expectColdList(slab1, &.{ 33, 32, 31});
+}
+
+test "lru, half to hot" {
+    var s = try ServiceTest.init(.{ .hot_ratio = 0.5 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    var item1 = s.newItem(31);
+    var item2 = s.newItem(32);
+    var item3 = s.newItem(33);
+
+    s.putItem(slab1, &item1);
+    s.putItem(slab1, &item2);
+
+    try s.expectHotList(slab1, &.{32});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{31});
+
+    s.putItem(slab1, &item3);
+
+    try s.expectHotList(slab1, &.{33});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{32, 31});
 }

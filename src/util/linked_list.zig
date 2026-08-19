@@ -53,6 +53,15 @@ pub const ListHead = struct {
         item.next = head;
     }
 
+    pub fn pushFront(head: *Self, item: *ListHead) void {
+        const front = head.next;
+        front.prev = item;
+        item.next = front;
+
+        head.next = item;
+        item.prev = head;
+    }
+
     pub fn popFront(head: *Self) ?*ListHead {
         const item = head.next;
         if (item == head) {
@@ -148,8 +157,6 @@ fn expectListValues(expected: []const u64, head: *ListHead) !void {
 }
 
 test "normal" {
-    const gpa = std.testing.allocator;
-
     var head: ListHead = undefined;
     head.initHeader();
 
@@ -160,10 +167,6 @@ test "normal" {
     head.pushBack(&e1.list);
     head.pushBack(&e2.list);
     head.pushBack(&e3.list);
-
-    const ValueList = std.ArrayList(u64);
-    var values = ValueList.empty;
-    defer values.deinit(gpa);
 
     // iterate forward
     var iter1 = head.iterate();
@@ -243,4 +246,25 @@ test "pop back" {
     try expectEntryValue(head.popBack(), 22);
     try expectEntryValue(head.popBack(), 21);
     try std.testing.expect(head.popBack() == null);
+}
+
+test "push front" {
+    var head: ListHead = undefined;
+    head.initHeader();
+
+    var e1 = TestEntry.init(21);
+    var e2 = TestEntry.init(22);
+    var e3 = TestEntry.init(23);
+
+    head.pushFront(&e1.list);
+    head.pushFront(&e2.list);
+    head.pushFront(&e3.list);
+
+    // iterate forward
+    var iter1 = head.iterate();
+    try expectIterValues(&.{ 23, 22, 21 }, &iter1);
+
+    // iterate backward
+    var iter2 = head.iterateBackward();
+    try expectIterValues(&.{ 21, 22, 23 }, &iter2);
 }

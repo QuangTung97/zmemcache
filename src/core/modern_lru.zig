@@ -217,12 +217,15 @@ pub fn ModernLru(
 
             const item = touch_item.item;
             if (!item.slab_flags.is_present) {
+                // TODO testing
                 return;
             }
             if (!item.cas_num.equal(touch_item.cas)) {
+                // TODO testing
                 return;
             }
             if (item.atomic_flags.getInfo().lru != .Cold) {
+                // TODO testing
                 return;
             }
 
@@ -234,8 +237,17 @@ pub fn ModernLru(
             self.rebalanceLruLists(state);
         }
 
-        pub fn deleteItem(_: *Self, _: SlabClass, _: *Item) void {
-            // TODO
+        pub fn deleteItem(self: *Self, slab: SlabClass, item: *Item) void {
+            std.debug.assert(!item.slab_flags.is_present);
+            const state = self.getSlabState(slab);
+
+            switch (item.atomic_flags.getInfo().lru) {
+                .Hot => state.getHot().deleteFromList(item),
+                .Warm => state.getWarm().deleteFromList(item),
+                .Cold => state.getCold().deleteFromList(item),
+            }
+
+            self.rebalanceLruLists(state);
         }
 
         pub fn iterateItems(self: *Self, slab: SlabClass, iterator: ItemIter) void {
@@ -265,11 +277,10 @@ pub fn ModernLru(
         }
 
         fn rebalanceLruLists(self: *Self, state: *SlabClassState) void {
-            const total_int = state.num_hot + state.num_warm + state.num_cold;
-            const total: f64 = @floatFromInt(total_int);
+            const total = state.getTotal();
 
-            const expected_hot: usize = @floor(total * self._conf.hot_ratio);
-            while (state.num_hot > expected_hot) {
+            const max_hot: usize = @floor(total * self._conf.hot_ratio);
+            while (state.num_hot > max_hot) {
                 const entry = state.getHot().popFromList().?;
                 const item = Item.fromList(entry);
                 const is_active = item.atomic_flags.getInfo().is_active;
@@ -280,9 +291,9 @@ pub fn ModernLru(
                 }
             }
 
-            const expected_warm: usize = @floor(total * self._conf.warm_ratio);
+            const max_warm: usize = @floor(total * self._conf.warm_ratio);
             var repeated_active_count: usize = 0;
-            while (state.num_warm > expected_warm) {
+            while (state.num_warm > max_warm) {
                 const entry = state.getWarm().popFromList().?;
                 const item = Item.fromList(entry);
                 const is_active = item.atomic_flags.getInfo().is_active;
@@ -466,8 +477,15 @@ const ServiceTest = struct {
     }
 
     fn asyncTouch(self: *Self) void {
+        defer self.checkInvariant();
         const item = self.touch_list.pop() catch unreachable;
         self.svc.asyncTouchItem(item);
+    }
+
+    fn deleteItem(self: *Self, slab: SlabClass, item: *Item) void {
+        defer self.checkInvariant();
+        item.slab_flags.is_present = false;
+        self.svc.deleteItem(slab, item);
     }
 
     fn expectHotList(self: *Self, slab: SlabClass, cas_list: TestCasList) !void {
@@ -978,4 +996,101 @@ test "cold to warm => with max repeated in warm = 1" {
     try s.expectHotList(slab1, &.{35});
     try s.expectWarmList(slab1, &.{ 32, 34 });
     try s.expectColdList(slab1, &.{ 33, 31 });
+}
+
+test "delete in cold" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    try s.expectHotList(slab1, &.{ 35, 34 });
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
+
+    s.deleteItem(slab1, item2);
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 34, 33, 31 });
+}
+
+test "delete in hot" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    try s.expectHotList(slab1, &.{ 35, 34 });
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
+
+    s.deleteItem(slab1, item4);
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
+}
+
+test "delete in warm" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.2,
+        .warm_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    s.touchItem(slab1, item2);
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{32});
+    try s.expectColdList(slab1, &.{ 34, 33, 31 });
+
+    s.deleteItem(slab1, item2);
+
+    try s.expectHotList(slab1, &.{});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 35, 34, 33, 31 });
 }

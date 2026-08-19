@@ -217,15 +217,12 @@ pub fn ModernLru(
 
             const item = touch_item.item;
             if (!item.slab_flags.is_present) {
-                // TODO testing
                 return;
             }
             if (!item.cas_num.equal(touch_item.cas)) {
-                // TODO testing
                 return;
             }
             if (item.atomic_flags.getInfo().lru != .Cold) {
-                // TODO testing
                 return;
             }
 
@@ -996,6 +993,119 @@ test "cold to warm => with max repeated in warm = 1" {
     try s.expectHotList(slab1, &.{35});
     try s.expectWarmList(slab1, &.{ 32, 34 });
     try s.expectColdList(slab1, &.{ 33, 31 });
+}
+
+test "async touch to warm, cas mismatch" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.2,
+        .warm_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+
+    s.touchItem(slab1, item2);
+
+    var touch_item = s.touch_list.pop() catch unreachable;
+    touch_item.cas.cas += 100;
+    s.svc.asyncTouchItem(touch_item);
+
+    try s.expectHotList(slab1, &.{});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
+}
+
+test "async touch to warm, item is not present" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.2,
+        .warm_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+
+    s.touchItem(slab1, item2);
+
+    const touch_item = s.touch_list.pop() catch unreachable;
+    touch_item.item.slab_flags.is_present = false;
+    s.svc.asyncTouchItem(touch_item);
+
+    try s.expectHotList(slab1, &.{});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
+}
+
+test "async touch to warm, double touch, lru list is not cold" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.2,
+        .warm_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+
+    s.touchItem(slab1, item2);
+    s.touchItem(slab1, item2);
+    s.asyncTouch();
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{});
+    try s.expectWarmList(slab1, &.{32});
+    try s.expectColdList(slab1, &.{ 33, 31 });
+}
+
+test "async touch to warm, page is moved" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.2,
+        .warm_ratio = 0.4,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+
+    s.touchItem(slab1, item2);
+    const page_num = s.pager.getPageNumOfItem(item2);
+    s.pager.updatePageSlab(page_num, null);
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
+
+    // update back
+    s.pager.updatePageSlab(page_num, slab1);
 }
 
 test "delete in cold" {

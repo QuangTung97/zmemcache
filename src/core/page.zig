@@ -250,7 +250,7 @@ pub const GlobalPager = struct {
         const ptr: [*]ListHead = @ptrCast(entry);
 
         const offset = ptr - base;
-        std.debug.assert(offset <= self.priv.all_page_heads.len);
+        std.debug.assert(offset < self.priv.all_page_heads.len);
 
         return PageNum.init(offset);
     }

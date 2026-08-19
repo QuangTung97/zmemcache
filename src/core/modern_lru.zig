@@ -23,6 +23,7 @@ const LruListInfo = struct {
     const Self = @This();
 
     fn pushToList(self: Self, item: *Item) void {
+        std.debug.assert(item.slab_flags.is_present);
         item.atomic_flags.setLru(self.lru_enum);
         self.head.pushFront(&item.lru_list);
         self.counter.* += 1;

@@ -100,8 +100,15 @@ pub const RefCount = struct {
 
 pub const CasNum = struct {
     cas: u64,
-    pub fn init(x: u64) @This() {
+
+    const Self = @This();
+
+    pub fn init(x: u64) Self {
         return .{ .cas = x };
+    }
+
+    pub fn equal(self: Self, other: Self) bool {
+        return self.cas == other.cas;
     }
 };
 

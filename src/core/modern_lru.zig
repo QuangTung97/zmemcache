@@ -13,6 +13,7 @@ const Item = types.Item;
 const ItemIter = zlru.ItemIter;
 const CasNum = types.CasNum;
 const LruList = types.LruList;
+const TouchItem = ztouch.TouchItem;
 
 const SlabClassState = struct {
     mutex: std.Io.Mutex,
@@ -50,6 +51,7 @@ pub fn ModernLru(
         const Config = struct {
             num_classes: usize,
             hot_ratio: f64,
+            warm_ratio: f64,
         };
 
         pub fn init(
@@ -146,6 +148,33 @@ pub fn ModernLru(
             }
         }
 
+        // asyncTouchItem must be called when locked
+        pub fn asyncTouchItem(self: *Self, touch_item: TouchItem) void {
+            const page_num = self._pager.getPageNumOfItem(touch_item.item);
+            const null_slab = self._pager.getSlabClass(page_num);
+            if (!touch_item.slab.nullEqual(null_slab)) {
+                return;
+            }
+
+            const item = touch_item.item;
+            if (!item.slab_flags.is_present) {
+                return;
+            }
+            if (!item.cas_num.equal(touch_item.cas)) {
+                return;
+            }
+            if (item.atomic_flags.getInfo().lru != .Cold) {
+                return;
+            }
+
+            const state = self.getSlabState(touch_item.slab);
+
+            deleteFromList(item, &state.num_cold, .Cold);
+            pushToList(&state.warm_list, &state.num_warm, item, .Warm);
+
+            self.rebalanceLruLists(state);
+        }
+
         pub fn deleteItem(_: *Self, _: SlabClass, _: *Item) void {
             // TODO
         }
@@ -183,7 +212,6 @@ pub fn ModernLru(
             const expected_hot: usize = @floor(total * self._conf.hot_ratio);
             while (state.num_hot > expected_hot) {
                 const entry = popFromList(&state.hot_list, &state.num_hot).?;
-
                 const item = Item.fromList(entry);
                 const is_active = item.atomic_flags.getInfo().is_active;
                 if (is_active) {
@@ -191,6 +219,13 @@ pub fn ModernLru(
                 } else {
                     pushToList(&state.cold_list, &state.num_cold, item, .Cold);
                 }
+            }
+
+            const expected_warm: usize = @floor(total * self._conf.warm_ratio);
+            while (state.num_warm > expected_warm) {
+                const entry = popFromList(&state.warm_list, &state.num_warm).?;
+                const item = Item.fromList(entry);
+                pushToList(&state.cold_list, &state.num_cold, item, .Cold);
             }
         }
 
@@ -206,6 +241,12 @@ pub fn ModernLru(
 
             counter.* -= 1;
             return entry;
+        }
+
+        fn deleteFromList(item: *Item, counter: *usize, lru_enum: LruList) void {
+            std.debug.assert(item.atomic_flags.getInfo().lru == lru_enum);
+            item.lru_list.remove();
+            counter.* -= 1;
         }
 
         pub fn pushPage(self: *Self, slab: SlabClass, page_num: PageNum) void {
@@ -283,11 +324,13 @@ const ServiceTest = struct {
 
     pager: *zpage.GlobalPager,
     touch_list: ztouch.FakeTouchList,
+    fake_lru: zlru.FakeLruService,
     svc: Service,
 
     const Config = struct {
         num_classes: usize = 5,
         hot_ratio: f64 = 0.2,
+        warm_ratio: f64 = 0.4,
     };
 
     fn init(conf: Config) !*Self {
@@ -298,12 +341,14 @@ const ServiceTest = struct {
         s.* = .{
             .pager = try zpage.GlobalPager.init(io, gpa, 10, 20),
             .touch_list = try ztouch.FakeTouchList.init(gpa),
+            .fake_lru = zlru.FakeLruService.init(gpa),
             .svc = undefined,
         };
 
         s.svc = try Service.init(io, gpa, s.pager, &s.touch_list, .{
             .num_classes = conf.num_classes,
             .hot_ratio = conf.hot_ratio,
+            .warm_ratio = conf.warm_ratio,
         });
 
         return s;
@@ -314,17 +359,51 @@ const ServiceTest = struct {
 
         const gpa = std.testing.allocator;
 
-        self.pager.deinit();
         self.svc.deinit();
+        self.fake_lru.deinit();
+        self.touch_list.deinit();
+        self.pager.deinit();
         gpa.destroy(self);
     }
 
-    fn newItem(_: *Self, slab: SlabClass, cas: u64) Item {
-        var item: Item = undefined;
-        item.slab = slab;
-        item.slab_flags.is_present = true;
+    fn newItem(self: *Self, slab: SlabClass, cas: u64) *Item {
+        const item = self.allocNewItem(slab);
         item.cas_num = CasNum.init(cas);
+        item.slab_flags.is_present = true;
         return item;
+    }
+
+    fn allocNewItem(self: *Self, slab: SlabClass) *Item {
+        const null_item = self.fake_lru.getFreeItem(slab);
+        if (null_item) |it| {
+            return it;
+        }
+
+        const null_page = self.pager.allocPage(slab);
+        const page = null_page.?;
+
+        const IterateCtx = struct {
+            self: *Self,
+            slab: SlabClass,
+            fn yield(ctx: *@This(), item: *Item) bool {
+                item.slab_flags.is_present = false;
+                item.slab = ctx.slab;
+                ctx.self.fake_lru.putFreeItem(ctx.slab, item);
+                return true;
+            }
+        };
+        var ctx = IterateCtx{
+            .self = self,
+            .slab = slab,
+        };
+        self.pager.iterateItemsOfPage(
+            page,
+            Item.Size,
+            &ctx,
+            IterateCtx.yield,
+        );
+
+        return self.fake_lru.getFreeItem(slab).?;
     }
 
     fn putItem(self: *Self, slab: SlabClass, item: *Item) void {
@@ -335,6 +414,11 @@ const ServiceTest = struct {
     fn touchItem(self: *Self, slab: SlabClass, item: *Item) void {
         defer self.checkInvariant();
         self.svc.touchItem(slab, item);
+    }
+
+    fn asyncTouch(self: *Self) void {
+        const item = self.touch_list.pop() catch unreachable;
+        self.svc.asyncTouchItem(item);
     }
 
     fn expectHotList(self: *Self, slab: SlabClass, cas_list: TestCasList) !void {
@@ -451,6 +535,15 @@ const ServiceTest = struct {
             validateLruList(&state.hot_list, state.num_hot, .Hot);
             validateLruList(&state.warm_list, state.num_warm, .Warm);
             validateLruList(&state.cold_list, state.num_cold, .Cold);
+
+            const total_int = state.num_hot + state.num_warm + state.num_cold;
+            const total: f64 = @floatFromInt(total_int);
+
+            const max_hot: usize = @floor(total * self.svc._conf.hot_ratio);
+            const max_warm: usize = @floor(total * self.svc._conf.warm_ratio);
+
+            std.debug.assert(state.num_hot <= max_hot);
+            std.debug.assert(state.num_warm <= max_warm);
         }
     }
 
@@ -603,13 +696,13 @@ test "lru, all to cold" {
 
     const slab1 = SlabClass.init(1);
 
-    var item1 = s.newItem(slab1, 31);
-    var item2 = s.newItem(slab1, 32);
-    var item3 = s.newItem(slab1, 33);
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
 
-    s.putItem(slab1, &item1);
-    s.putItem(slab1, &item2);
-    s.putItem(slab1, &item3);
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
 
     try s.expectHotList(slab1, &.{});
     try s.expectWarmList(slab1, &.{});
@@ -629,12 +722,12 @@ test "lru, half to hot" {
 
     const slab1 = SlabClass.init(1);
 
-    var item1 = s.newItem(slab1, 31);
-    var item2 = s.newItem(slab1, 32);
-    var item3 = s.newItem(slab1, 33);
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
 
-    s.putItem(slab1, &item1);
-    s.putItem(slab1, &item2);
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
 
     try s.expectHotList(slab1, &.{32});
     try s.expectWarmList(slab1, &.{});
@@ -642,7 +735,7 @@ test "lru, half to hot" {
     try s.expectIterateLru(slab1, &.{ 31, 32 }, 100);
     try s.expectIterateLru(slab1, &.{31}, 1);
 
-    s.putItem(slab1, &item3);
+    s.putItem(slab1, item3);
 
     try s.expectHotList(slab1, &.{33});
     try s.expectWarmList(slab1, &.{});
@@ -657,19 +750,19 @@ test "put to hot => touch => move to warm" {
 
     const slab1 = SlabClass.init(1);
 
-    var item1 = s.newItem(slab1, 31);
-    var item2 = s.newItem(slab1, 32);
-    var item3 = s.newItem(slab1, 33);
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
 
-    s.putItem(slab1, &item1);
-    s.putItem(slab1, &item2);
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
 
     try s.expectHotList(slab1, &.{32});
     try s.expectWarmList(slab1, &.{});
     try s.expectColdList(slab1, &.{31});
 
-    s.touchItem(slab1, &item2); // touch item 2
-    s.putItem(slab1, &item3);
+    s.touchItem(slab1, item2); // touch item 2
+    s.putItem(slab1, item3);
 
     try s.expectHotList(slab1, &.{33});
     try s.expectWarmList(slab1, &.{32});
@@ -678,4 +771,76 @@ test "put to hot => touch => move to warm" {
     try s.expectIterateLru(slab1, &.{ 31, 32, 33 }, 100);
     try s.expectIterateLru(slab1, &.{ 31, 32 }, 2);
     try s.expectIterateLru(slab1, &.{31}, 1);
+}
+
+test "cold to warm" {
+    var s = try ServiceTest.init(.{ .hot_ratio = 0.2, .warm_ratio = 0.4 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    s.touchItem(slab1, item2);
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 34, 33, 32, 31 });
+    try expectEqual(1, s.touch_list._queue.len); // update touch list
+
+    // async touch
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{32});
+    try s.expectColdList(slab1, &.{ 34, 33, 31 });
+    try expectEqual(0, s.touch_list._queue.len);
+}
+
+test "cold to warm, multi items" {
+    var s = try ServiceTest.init(.{ .hot_ratio = 0.2, .warm_ratio = 0.4 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    s.touchItem(slab1, item2);
+    s.touchItem(slab1, item3);
+    s.touchItem(slab1, item4);
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 34, 33, 32, 31 });
+    try expectEqual(3, s.touch_list._queue.len); // update touch list
+
+    // async touch
+    s.asyncTouch();
+    s.asyncTouch();
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{ 34, 33 });
+    try s.expectColdList(slab1, &.{ 32, 31 });
+    try expectEqual(0, s.touch_list._queue.len);
 }

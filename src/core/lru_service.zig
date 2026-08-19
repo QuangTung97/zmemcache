@@ -179,6 +179,8 @@ pub const FakeLruService = struct {
 
     pub fn putFreeItem(self: *Self, slab: Slab, item: *Item) void {
         std.debug.assert(!item.slab_flags.is_present);
+        std.debug.assert(item.slab.equal(slab));
+
         const head = self.getFreeList(slab);
         head.pushBack(&item.lru_list);
     }
@@ -186,10 +188,13 @@ pub const FakeLruService = struct {
     pub fn getFreeItem(self: *Self, slab: Slab) ?*Item {
         const head = self.getFreeList(slab);
         const null_node = head.popBack();
-        if (null_node) |node| {
-            return Item.fromList(node);
-        }
-        return null;
+
+        const node = null_node orelse return null;
+        const item = Item.fromList(node);
+
+        std.debug.assert(!item.slab_flags.is_present);
+        std.debug.assert(item.slab.equal(slab));
+        return item;
     }
 
     pub fn deleteFreeItem(_: *Self, _: Slab, item: *Item) void {
@@ -288,9 +293,10 @@ fn newItem(v: u64) Item {
     return item;
 }
 
-fn newFreeItem(v: u64) Item {
+fn newFreeItem(slab: Slab, v: u64) Item {
     var item: Item = undefined;
     item.cas_num = CasNum.init(v);
+    item.slab = slab;
     item.slab_flags.is_present = false;
     return item;
 }
@@ -355,9 +361,9 @@ test "free list" {
 
     const slab1 = Slab.init(11);
 
-    var item1 = newFreeItem(41);
-    var item2 = newFreeItem(42);
-    var item3 = newFreeItem(43);
+    var item1 = newFreeItem(slab1, 41);
+    var item2 = newFreeItem(slab1, 42);
+    var item3 = newFreeItem(slab1, 43);
 
     s.putFreeItem(slab1, &item1);
     s.putFreeItem(slab1, &item2);

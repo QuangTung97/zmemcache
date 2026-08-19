@@ -567,6 +567,7 @@ pub fn ItemService(
                 slab: SlabClass,
                 fn yield(ctx: *@This(), item: *Item) bool {
                     item.slab_flags.is_present = false;
+                    item.slab = ctx.slab;
                     LruFuncs.putFreeItem(ctx.self._lru, ctx.slab, item);
                     return true;
                 }

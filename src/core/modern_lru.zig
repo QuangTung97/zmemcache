@@ -133,8 +133,30 @@ pub const ModernLru = struct {
         // TODO
     }
 
-    pub fn iterateItems(_: *Self, _: SlabClass, _: ItemIter) void {
-        // TODO
+    pub fn iterateItems(self: *Self, slab: SlabClass, iterator: ItemIter) void {
+        const state = self.getSlabState(slab);
+
+        if (!iterateLruList(&state.cold_list, iterator)) {
+            return;
+        }
+        if (!iterateLruList(&state.warm_list, iterator)) {
+            return;
+        }
+        if (!iterateLruList(&state.hot_list, iterator)) {
+            return;
+        }
+    }
+
+    fn iterateLruList(head: *ListHead, iterator: ItemIter) bool {
+        var iter = head.iterateBackward();
+        while (iter.next()) |e| {
+            const item = Item.fromList(e);
+            const ok = iterator.yield(item);
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
     }
 
     fn rebalanceLruLists(self: *Self, state: *SlabClassState) void {
@@ -325,6 +347,30 @@ const ServiceTest = struct {
         return list;
     }
 
+    fn expectIterateLru(self: *Self, slab: SlabClass, cas_list: TestCasList, max_num: usize) !void {
+        const gpa = std.testing.allocator;
+
+        var ctx = struct {
+            list: std.ArrayList(u64),
+            num: usize,
+            max_num: usize,
+            pub fn yield(ctx: *@This(), item: *Item) bool {
+                ctx.num += 1;
+                ctx.list.append(gpa, item.cas_num.cas) catch unreachable;
+                return ctx.num < ctx.max_num;
+            }
+        }{
+            .list = .empty,
+            .num = 0,
+            .max_num = max_num,
+        };
+        defer ctx.list.deinit(gpa);
+
+        self.svc.iterateItems(slab, ItemIter.init(&ctx));
+
+        try std.testing.expectEqualSlices(u64, cas_list, ctx.list.items);
+    }
+
     fn newFreeItem(_: *Self, cas: u64) Item {
         var item: Item = undefined;
         item.slab_flags.is_present = false;
@@ -380,7 +426,7 @@ const ServiceTest = struct {
     }
 
     fn validateLruList(head: *ListHead, counter: usize, lru_enum: LruList) void {
-        var total : usize = 0;
+        var total: usize = 0;
         var iter = head.iterate();
         while (iter.next()) |e| {
             const item = Item.fromList(e);
@@ -539,6 +585,10 @@ test "lru, all to cold" {
     try s.expectHotList(slab1, &.{});
     try s.expectWarmList(slab1, &.{});
     try s.expectColdList(slab1, &.{ 33, 32, 31 });
+
+    // check iterate
+    try s.expectIterateLru(slab1, &.{ 31, 32, 33 }, 100);
+    try s.expectIterateLru(slab1, &.{31}, 1);
 }
 
 test "lru, half to hot" {
@@ -557,12 +607,16 @@ test "lru, half to hot" {
     try s.expectHotList(slab1, &.{32});
     try s.expectWarmList(slab1, &.{});
     try s.expectColdList(slab1, &.{31});
+    try s.expectIterateLru(slab1, &.{ 31, 32 }, 100);
+    try s.expectIterateLru(slab1, &.{31}, 1);
 
     s.putItem(slab1, &item3);
 
     try s.expectHotList(slab1, &.{33});
     try s.expectWarmList(slab1, &.{});
     try s.expectColdList(slab1, &.{ 32, 31 });
+    try s.expectIterateLru(slab1, &.{ 31, 32, 33 }, 100);
+    try s.expectIterateLru(slab1, &.{ 31, 32 }, 2);
 }
 
 test "put to hot => touch => move to warm" {
@@ -588,4 +642,8 @@ test "put to hot => touch => move to warm" {
     try s.expectHotList(slab1, &.{33});
     try s.expectWarmList(slab1, &.{32});
     try s.expectColdList(slab1, &.{31});
+
+    try s.expectIterateLru(slab1, &.{ 31, 32, 33 }, 100);
+    try s.expectIterateLru(slab1, &.{ 31, 32 }, 2);
+    try s.expectIterateLru(slab1, &.{31}, 1);
 }

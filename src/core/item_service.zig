@@ -587,6 +587,26 @@ pub fn ItemService(
             LruFuncs.pushPage(self._lru, slab_class, page_num);
         }
 
+        const LruEvictIterateCtx = struct {
+            self: *Self,
+            lock_ctx: *LockCtx,
+            current_slot: LockSlot,
+            num_attempts: usize,
+            pub fn yield(ctx: *@This(), item: *Item) bool {
+                const ok = ctx.self.tryToEvictItem(
+                    ctx.lock_ctx,
+                    item,
+                    ctx.current_slot,
+                );
+                if (ok) {
+                    return false;
+                }
+
+                ctx.num_attempts += 1;
+                return ctx.num_attempts < ctx.self._max_evict_attempts;
+            }
+        };
+
         fn evictFromLru(
             self: *Self,
             lock_ctx: *LockCtx,
@@ -595,25 +615,7 @@ pub fn ItemService(
         ) void {
             self.assertSlabLocked(lock_ctx, slab);
 
-            var ctx = struct {
-                self: *Self,
-                lock_ctx: *LockCtx,
-                current_slot: LockSlot,
-                num_attempts: usize,
-                pub fn yield(ctx: *@This(), item: *Item) bool {
-                    const ok = ctx.self.tryToEvictItem(
-                        ctx.lock_ctx,
-                        item,
-                        ctx.current_slot,
-                    );
-                    if (ok) {
-                        return false;
-                    }
-
-                    ctx.num_attempts += 1;
-                    return ctx.num_attempts < ctx.self._max_evict_attempts;
-                }
-            }{
+            var ctx = LruEvictIterateCtx{
                 .self = self,
                 .lock_ctx = lock_ctx,
                 .current_slot = current_slot,
@@ -1056,28 +1058,29 @@ const ServiceTest = struct {
         }
     }
 
+    const LruIterateCtx = struct {
+        slab: SlabClass,
+        self: *Self,
+        total: usize,
+        pub fn yield(ctx: *@This(), item: *Item) bool {
+            std.debug.assert(item.slab_flags.is_present);
+            std.debug.assert(item.slab.slab == ctx.slab.slab);
+            std.debug.assert(item.refcount.refcount > 0);
+
+            ctx.self.checkItemInSlab(item, ctx.slab);
+
+            const page_num = ctx.self.pager.getPageNumOfItem(item);
+            const moving_page = ctx.self.lru_svc.getMovingPage(ctx.slab);
+            if (!page_num.nullEqual(moving_page)) {
+                ctx.total += 1;
+            }
+            return true;
+        }
+    };
+
     fn checkSlabInvariant(self: *Self, slab: SlabClass, num_pages: usize) void {
         // check lru list
-        var lru_ctx = struct {
-            slab: SlabClass,
-            self: *Self,
-            total: usize,
-            pub fn yield(ctx: *@This(), item: *Item) bool {
-                std.debug.assert(item.slab_flags.is_present);
-                std.debug.assert(item.slab.slab == ctx.slab.slab);
-                std.debug.assert(item.refcount.refcount > 0);
-
-                ctx.self.checkItemInSlab(item, ctx.slab);
-
-                const page_num = ctx.self.pager.getPageNumOfItem(item);
-                const moving_page = ctx.self.lru_svc.getMovingPage(ctx.slab);
-                if (!page_num.nullEqual(moving_page)) {
-                    ctx.total += 1;
-                }
-
-                return true;
-            }
-        }{
+        var lru_ctx = LruIterateCtx{
             .slab = slab,
             .self = self,
             .total = 0,

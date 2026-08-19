@@ -3,6 +3,7 @@ const zutil = @import("zutil");
 const types = @import("types.zig");
 const zpage = @import("page.zig");
 const zlru = @import("lru_service.zig");
+const ztouch = @import("touch_list.zig");
 
 const Allocator = std.mem.Allocator;
 const ListHead = zutil.ListHead;
@@ -13,239 +14,256 @@ const ItemIter = zlru.ItemIter;
 const CasNum = types.CasNum;
 const LruList = types.LruList;
 
-pub const ModernLru = struct {
-    const Self = @This();
+const SlabClassState = struct {
+    mutex: std.Io.Mutex,
 
-    const SlabClassState = struct {
-        mutex: std.Io.Mutex,
+    free_list: ListHead,
+    hot_list: ListHead,
+    warm_list: ListHead,
+    cold_list: ListHead,
 
-        free_list: ListHead,
-        hot_list: ListHead,
-        warm_list: ListHead,
-        cold_list: ListHead,
+    num_free: usize,
+    num_hot: usize,
+    num_warm: usize,
+    num_cold: usize,
 
-        num_free: usize,
-        num_hot: usize,
-        num_warm: usize,
-        num_cold: usize,
+    page_list: ListHead,
+    moving_page: ?PageNum,
 
-        page_list: ListHead,
-        moving_page: ?PageNum,
+    _padding: [8 * 7]u8 = undefined,
+};
 
-        _padding: [8 * 7]u8 = undefined,
-    };
+pub fn ModernLru(
+    TouchList: type,
+    TouchListFuncs: ztouch.TouchListFuncs(TouchList),
+) type {
+    return struct {
+        const Self = @This();
 
-    _io: std.Io,
-    _gpa: Allocator,
-    _all_classes: []SlabClassState,
-    _pager: *zpage.GlobalPager,
-    _conf: Config,
+        _io: std.Io,
+        _gpa: Allocator,
+        _all_classes: []SlabClassState,
+        _pager: *zpage.GlobalPager,
+        _conf: Config,
+        _touch_list: *TouchList,
 
-    const Config = struct {
-        num_classes: usize,
-        hot_ratio: f64,
-    };
-
-    pub fn init(
-        io: std.Io,
-        gpa: Allocator,
-        pager: *zpage.GlobalPager,
-        conf: Config,
-    ) !Self {
-        zutil.runtimeAssert(conf.num_classes <= SlabClass.MaxNumClass);
-        const all_classes = try gpa.alloc(SlabClassState, conf.num_classes);
-        for (all_classes) |*s| {
-            s.* = .{
-                .mutex = .init,
-
-                .free_list = undefined,
-                .hot_list = undefined,
-                .warm_list = undefined,
-                .cold_list = undefined,
-
-                .num_free = 0,
-                .num_hot = 0,
-                .num_warm = 0,
-                .num_cold = 0,
-
-                .page_list = undefined,
-                .moving_page = null,
-            };
-
-            ListHead.initHeader(&s.free_list);
-            ListHead.initHeader(&s.hot_list);
-            ListHead.initHeader(&s.warm_list);
-            ListHead.initHeader(&s.cold_list);
-
-            ListHead.initHeader(&s.page_list);
-
-            ListHead.validateInit(&s.free_list);
-            ListHead.validateInit(&s.hot_list);
-            ListHead.validateInit(&s.warm_list);
-            ListHead.validateInit(&s.cold_list);
-            ListHead.validateInit(&s.page_list);
-        }
-
-        return .{
-            ._io = io,
-            ._gpa = gpa,
-            ._all_classes = all_classes,
-            ._pager = pager,
-            ._conf = conf,
+        const Config = struct {
+            num_classes: usize,
+            hot_ratio: f64,
         };
-    }
 
-    pub fn deinit(self: *Self) void {
-        self._gpa.free(self._all_classes);
-    }
+        pub fn init(
+            io: std.Io,
+            gpa: Allocator,
+            pager: *zpage.GlobalPager,
+            touch_list: *TouchList,
+            conf: Config,
+        ) !Self {
+            zutil.runtimeAssert(conf.num_classes <= SlabClass.MaxNumClass);
+            const all_classes = try gpa.alloc(SlabClassState, conf.num_classes);
+            for (all_classes) |*s| {
+                s.* = .{
+                    .mutex = .init,
 
-    pub fn lockSlab(self: *Self, slab: SlabClass) void {
-        const state = self.getSlabState(slab);
-        state.mutex.lockUncancelable(self._io);
-    }
+                    .free_list = undefined,
+                    .hot_list = undefined,
+                    .warm_list = undefined,
+                    .cold_list = undefined,
 
-    // for testing only
-    fn isSlabLocked(self: *Self, slab: SlabClass) bool {
-        const state = self.getSlabState(slab);
-        return state.mutex.state.load(.seq_cst) == .locked_once;
-    }
+                    .num_free = 0,
+                    .num_hot = 0,
+                    .num_warm = 0,
+                    .num_cold = 0,
 
-    pub fn unlockSlab(self: *Self, slab: SlabClass) void {
-        const state = self.getSlabState(slab);
-        state.mutex.unlock(self._io);
-    }
+                    .page_list = undefined,
+                    .moving_page = null,
+                };
 
-    pub fn putItem(self: *Self, slab: SlabClass, item: *Item) void {
-        std.debug.assert(item.slab_flags.is_present);
+                ListHead.initHeader(&s.free_list);
+                ListHead.initHeader(&s.hot_list);
+                ListHead.initHeader(&s.warm_list);
+                ListHead.initHeader(&s.cold_list);
 
-        const state = self.getSlabState(slab);
-        pushToList(&state.hot_list, &state.num_hot, item, .Hot);
-        self.rebalanceLruLists(state);
-    }
+                ListHead.initHeader(&s.page_list);
 
-    pub fn touchItem(_: *Self, _: SlabClass, item: *Item) void {
-        std.debug.assert(item.slab_flags.is_present);
-        _ = item.atomic_flags.setActive();
-        // TODO
-    }
+                ListHead.validateInit(&s.free_list);
+                ListHead.validateInit(&s.hot_list);
+                ListHead.validateInit(&s.warm_list);
+                ListHead.validateInit(&s.cold_list);
+                ListHead.validateInit(&s.page_list);
+            }
 
-    pub fn deleteItem(_: *Self, _: SlabClass, _: *Item) void {
-        // TODO
-    }
-
-    pub fn iterateItems(self: *Self, slab: SlabClass, iterator: ItemIter) void {
-        const state = self.getSlabState(slab);
-
-        if (!iterateLruList(&state.cold_list, iterator)) {
-            return;
+            return .{
+                ._io = io,
+                ._gpa = gpa,
+                ._all_classes = all_classes,
+                ._pager = pager,
+                ._conf = conf,
+                ._touch_list = touch_list,
+            };
         }
-        if (!iterateLruList(&state.warm_list, iterator)) {
-            return;
-        }
-        if (!iterateLruList(&state.hot_list, iterator)) {
-            return;
-        }
-    }
 
-    fn iterateLruList(head: *ListHead, iterator: ItemIter) bool {
-        var iter = head.iterateBackward();
-        while (iter.next()) |e| {
-            const item = Item.fromList(e);
-            const ok = iterator.yield(item);
-            if (!ok) {
-                return false;
+        pub fn deinit(self: *Self) void {
+            self._gpa.free(self._all_classes);
+        }
+
+        pub fn lockSlab(self: *Self, slab: SlabClass) void {
+            const state = self.getSlabState(slab);
+            state.mutex.lockUncancelable(self._io);
+        }
+
+        // for testing only
+        fn isSlabLocked(self: *Self, slab: SlabClass) bool {
+            const state = self.getSlabState(slab);
+            return state.mutex.state.load(.seq_cst) == .locked_once;
+        }
+
+        pub fn unlockSlab(self: *Self, slab: SlabClass) void {
+            const state = self.getSlabState(slab);
+            state.mutex.unlock(self._io);
+        }
+
+        pub fn putItem(self: *Self, slab: SlabClass, item: *Item) void {
+            std.debug.assert(item.slab_flags.is_present);
+
+            const state = self.getSlabState(slab);
+            pushToList(&state.hot_list, &state.num_hot, item, .Hot);
+            self.rebalanceLruLists(state);
+        }
+
+        pub fn touchItem(self: *Self, slab: SlabClass, item: *Item) void {
+            std.debug.assert(item.slab_flags.is_present);
+            std.debug.assert(item.slab.equal(slab));
+
+            const status = item.atomic_flags.setActive();
+            switch (status) {
+                .OK => {
+                    return;
+                },
+                .IsCold => {
+                    TouchListFuncs.push(self._touch_list, .fromItem(item));
+                },
             }
         }
-        return true;
-    }
 
-    fn rebalanceLruLists(self: *Self, state: *SlabClassState) void {
-        const total_int = state.num_hot + state.num_warm + state.num_cold;
-        const total: f64 = @floatFromInt(total_int);
+        pub fn deleteItem(_: *Self, _: SlabClass, _: *Item) void {
+            // TODO
+        }
 
-        const expected_hot: usize = @floor(total * self._conf.hot_ratio);
-        while (state.num_hot > expected_hot) {
-            const entry = popFromList(&state.hot_list, &state.num_hot).?;
+        pub fn iterateItems(self: *Self, slab: SlabClass, iterator: ItemIter) void {
+            const state = self.getSlabState(slab);
+
+            if (!iterateLruList(&state.cold_list, iterator)) {
+                return;
+            }
+            if (!iterateLruList(&state.warm_list, iterator)) {
+                return;
+            }
+            if (!iterateLruList(&state.hot_list, iterator)) {
+                return;
+            }
+        }
+
+        fn iterateLruList(head: *ListHead, iterator: ItemIter) bool {
+            var iter = head.iterateBackward();
+            while (iter.next()) |e| {
+                const item = Item.fromList(e);
+                const ok = iterator.yield(item);
+                if (!ok) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        fn rebalanceLruLists(self: *Self, state: *SlabClassState) void {
+            const total_int = state.num_hot + state.num_warm + state.num_cold;
+            const total: f64 = @floatFromInt(total_int);
+
+            const expected_hot: usize = @floor(total * self._conf.hot_ratio);
+            while (state.num_hot > expected_hot) {
+                const entry = popFromList(&state.hot_list, &state.num_hot).?;
+
+                const item = Item.fromList(entry);
+                const is_active = item.atomic_flags.getInfo().is_active;
+                if (is_active) {
+                    pushToList(&state.warm_list, &state.num_warm, item, .Warm);
+                } else {
+                    pushToList(&state.cold_list, &state.num_cold, item, .Cold);
+                }
+            }
+        }
+
+        fn pushToList(head: *ListHead, counter: *usize, item: *Item, lru_enum: LruList) void {
+            item.atomic_flags.setLru(lru_enum);
+            head.pushFront(&item.lru_list);
+            counter.* += 1;
+        }
+
+        fn popFromList(head: *ListHead, counter: *usize) ?*ListHead {
+            const null_entry = head.popBack();
+            const entry = null_entry orelse return null;
+
+            counter.* -= 1;
+            return entry;
+        }
+
+        pub fn pushPage(self: *Self, slab: SlabClass, page_num: PageNum) void {
+            const state = self.getSlabState(slab);
+            const entry = self._pager.getPageListHead(page_num);
+            state.page_list.pushBack(entry);
+        }
+
+        pub fn popPage(self: *Self, slab: SlabClass) ?PageNum {
+            const state = self.getSlabState(slab);
+            const null_entry = state.page_list.popFront();
+            const entry = null_entry orelse return null;
+
+            const page_num = self._pager.getPageNumOfListHead(entry);
+            return page_num;
+        }
+
+        pub fn setMovingPage(self: *Self, slab: SlabClass, page_num: ?PageNum) void {
+            const state = self.getSlabState(slab);
+            state.moving_page = page_num;
+        }
+
+        pub fn getMovingPage(self: *Self, slab: SlabClass) ?PageNum {
+            const state = self.getSlabState(slab);
+            return state.moving_page;
+        }
+
+        pub fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+            std.debug.assert(!item.slab_flags.is_present);
+            const state = self.getSlabState(slab);
+            state.free_list.pushBack(&item.lru_list);
+            state.num_free += 1;
+        }
+
+        pub fn getFreeItem(self: *Self, slab: SlabClass) ?*Item {
+            const state = self.getSlabState(slab);
+            const null_entry = state.free_list.popBack();
+            const entry = null_entry orelse return null;
 
             const item = Item.fromList(entry);
-            const is_active = item.atomic_flags.getInfo().is_active;
-            if (is_active) {
-                pushToList(&state.warm_list, &state.num_warm, item, .Warm);
-            } else {
-                pushToList(&state.cold_list, &state.num_cold, item, .Cold);
-            }
+            std.debug.assert(!item.slab_flags.is_present);
+            state.num_free -= 1;
+
+            return item;
         }
-    }
 
-    fn pushToList(head: *ListHead, counter: *usize, item: *Item, lru_enum: LruList) void {
-        item.atomic_flags.setLru(lru_enum);
-        head.pushFront(&item.lru_list);
-        counter.* += 1;
-    }
+        pub fn deleteFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
+            std.debug.assert(!item.slab_flags.is_present);
+            const state = self.getSlabState(slab);
+            item.lru_list.remove();
+            state.num_free -= 1;
+        }
 
-    fn popFromList(head: *ListHead, counter: *usize) ?*ListHead {
-        const null_entry = head.popBack();
-        const entry = null_entry orelse return null;
-
-        counter.* -= 1;
-        return entry;
-    }
-
-    pub fn pushPage(self: *Self, slab: SlabClass, page_num: PageNum) void {
-        const state = self.getSlabState(slab);
-        const entry = self._pager.getPageListHead(page_num);
-        state.page_list.pushBack(entry);
-    }
-
-    pub fn popPage(self: *Self, slab: SlabClass) ?PageNum {
-        const state = self.getSlabState(slab);
-        const null_entry = state.page_list.popFront();
-        const entry = null_entry orelse return null;
-
-        const page_num = self._pager.getPageNumOfListHead(entry);
-        return page_num;
-    }
-
-    pub fn setMovingPage(self: *Self, slab: SlabClass, page_num: ?PageNum) void {
-        const state = self.getSlabState(slab);
-        state.moving_page = page_num;
-    }
-
-    pub fn getMovingPage(self: *Self, slab: SlabClass) ?PageNum {
-        const state = self.getSlabState(slab);
-        return state.moving_page;
-    }
-
-    pub fn putFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
-        std.debug.assert(!item.slab_flags.is_present);
-        const state = self.getSlabState(slab);
-        state.free_list.pushBack(&item.lru_list);
-        state.num_free += 1;
-    }
-
-    pub fn getFreeItem(self: *Self, slab: SlabClass) ?*Item {
-        const state = self.getSlabState(slab);
-        const null_entry = state.free_list.popBack();
-        const entry = null_entry orelse return null;
-
-        const item = Item.fromList(entry);
-        std.debug.assert(!item.slab_flags.is_present);
-        state.num_free -= 1;
-
-        return item;
-    }
-
-    pub fn deleteFreeItem(self: *Self, slab: SlabClass, item: *Item) void {
-        std.debug.assert(!item.slab_flags.is_present);
-        const state = self.getSlabState(slab);
-        item.lru_list.remove();
-        state.num_free -= 1;
-    }
-
-    fn getSlabState(self: *Self, slab: SlabClass) *SlabClassState {
-        return &self._all_classes[slab.slab];
-    }
-};
+        fn getSlabState(self: *Self, slab: SlabClass) *SlabClassState {
+            return &self._all_classes[slab.slab];
+        }
+    };
+}
 
 // ===========================================================================
 // Testing
@@ -258,8 +276,14 @@ const TestCasList = []const u64;
 const ServiceTest = struct {
     const Self = @This();
 
+    const Service = ModernLru(
+        ztouch.FakeTouchList,
+        ztouch.NewTouchListFuncs(ztouch.FakeTouchList),
+    );
+
     pager: *zpage.GlobalPager,
-    svc: ModernLru,
+    touch_list: ztouch.FakeTouchList,
+    svc: Service,
 
     const Config = struct {
         num_classes: usize = 5,
@@ -271,9 +295,13 @@ const ServiceTest = struct {
         const gpa = std.testing.allocator;
 
         const s = try gpa.create(Self);
+        s.* = .{
+            .pager = try zpage.GlobalPager.init(io, gpa, 10, 20),
+            .touch_list = try ztouch.FakeTouchList.init(gpa),
+            .svc = undefined,
+        };
 
-        s.pager = try zpage.GlobalPager.init(io, gpa, 10, 20);
-        s.svc = try ModernLru.init(io, gpa, s.pager, .{
+        s.svc = try Service.init(io, gpa, s.pager, &s.touch_list, .{
             .num_classes = conf.num_classes,
             .hot_ratio = conf.hot_ratio,
         });
@@ -291,8 +319,9 @@ const ServiceTest = struct {
         gpa.destroy(self);
     }
 
-    fn newItem(_: *Self, cas: u64) Item {
+    fn newItem(_: *Self, slab: SlabClass, cas: u64) Item {
         var item: Item = undefined;
+        item.slab = slab;
         item.slab_flags.is_present = true;
         item.cas_num = CasNum.init(cas);
         return item;
@@ -438,11 +467,11 @@ const ServiceTest = struct {
 };
 
 test "slab class state size" {
-    try expectEqual(64 * 3, @sizeOf(ModernLru.SlabClassState));
+    try expectEqual(64 * 3, @sizeOf(SlabClassState));
 }
 
 test "check impl" {
-    const m = zlru.NewLruFuncs(ModernLru);
+    const m = zlru.NewLruFuncs(ServiceTest.Service);
     _ = m;
 }
 
@@ -574,9 +603,9 @@ test "lru, all to cold" {
 
     const slab1 = SlabClass.init(1);
 
-    var item1 = s.newItem(31);
-    var item2 = s.newItem(32);
-    var item3 = s.newItem(33);
+    var item1 = s.newItem(slab1, 31);
+    var item2 = s.newItem(slab1, 32);
+    var item3 = s.newItem(slab1, 33);
 
     s.putItem(slab1, &item1);
     s.putItem(slab1, &item2);
@@ -589,6 +618,9 @@ test "lru, all to cold" {
     // check iterate
     try s.expectIterateLru(slab1, &.{ 31, 32, 33 }, 100);
     try s.expectIterateLru(slab1, &.{31}, 1);
+
+    // check touch list
+    try expectEqual(0, s.touch_list._queue.len);
 }
 
 test "lru, half to hot" {
@@ -597,9 +629,9 @@ test "lru, half to hot" {
 
     const slab1 = SlabClass.init(1);
 
-    var item1 = s.newItem(31);
-    var item2 = s.newItem(32);
-    var item3 = s.newItem(33);
+    var item1 = s.newItem(slab1, 31);
+    var item2 = s.newItem(slab1, 32);
+    var item3 = s.newItem(slab1, 33);
 
     s.putItem(slab1, &item1);
     s.putItem(slab1, &item2);
@@ -625,9 +657,9 @@ test "put to hot => touch => move to warm" {
 
     const slab1 = SlabClass.init(1);
 
-    var item1 = s.newItem(31);
-    var item2 = s.newItem(32);
-    var item3 = s.newItem(33);
+    var item1 = s.newItem(slab1, 31);
+    var item2 = s.newItem(slab1, 32);
+    var item3 = s.newItem(slab1, 33);
 
     s.putItem(slab1, &item1);
     s.putItem(slab1, &item2);

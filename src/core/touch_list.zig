@@ -35,6 +35,8 @@ pub fn NewTouchListFuncs(T: type) TouchListFuncs(T) {
     };
 }
 
+// TODO add ring buffer touch list
+
 // ===========================================================================
 // Fake Touch List
 // ===========================================================================
@@ -46,7 +48,7 @@ pub const FakeTouchList = struct {
     _gpa: Allocator,
     _queue: Queue,
 
-    pub fn init(gpa: Allocator) Self {
+    pub fn init(gpa: Allocator) !Self {
         const queue = Queue.empty;
         return .{
             ._gpa = gpa,
@@ -87,7 +89,7 @@ fn newItem(slab: SlabClass, cas: u64) Item {
 }
 
 test "fake" {
-    var l = FakeTouchList.init(std.testing.allocator);
+    var l = try FakeTouchList.init(std.testing.allocator);
     defer l.deinit();
 
     const slab1 = SlabClass.init(1);

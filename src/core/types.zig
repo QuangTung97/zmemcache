@@ -223,6 +223,10 @@ pub const SlabClass = struct {
         };
         return self.slab == other_val.slab;
     }
+
+    pub fn equal(self: Self, other: Self) bool {
+        return self.slab == other.slab;
+    }
 };
 
 pub fn HashFunc(T: type) type {

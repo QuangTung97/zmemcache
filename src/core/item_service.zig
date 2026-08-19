@@ -499,10 +499,10 @@ pub fn ItemService(
 
             std.debug.assert(self._mover_need_delete.getCounter() == 0);
 
+            self.assertSlabLocked(&ctx, from_slab);
             const page_num = LruFuncs.getMovingPage(self._lru, from_slab).?;
 
             // clear moving page
-            self.assertSlabLocked(&ctx, from_slab);
             LruFuncs.setMovingPage(self._lru, from_slab, null);
             self._pager.updatePageSlab(page_num, null);
         }

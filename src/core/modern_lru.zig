@@ -110,6 +110,7 @@ pub fn ModernLru(
             num_classes: usize,
             hot_ratio: f64,
             warm_ratio: f64,
+            max_repeated_in_warm: usize,
         };
 
         pub fn init(
@@ -280,12 +281,16 @@ pub fn ModernLru(
             }
 
             const expected_warm: usize = @floor(total * self._conf.warm_ratio);
+            var repeated_active_count: usize = 0;
             while (state.num_warm > expected_warm) {
                 const entry = state.getWarm().popFromList().?;
                 const item = Item.fromList(entry);
-                if (item.atomic_flags.getInfo().is_active) {
+                const is_active = item.atomic_flags.getInfo().is_active;
+                if (is_active and repeated_active_count < self._conf.max_repeated_in_warm) {
+                    repeated_active_count += 1;
                     state.getWarm().pushToList(item);
                 } else {
+                    repeated_active_count = 0;
                     state.getCold().pushToList(item);
                 }
             }
@@ -373,6 +378,7 @@ const ServiceTest = struct {
         num_classes: usize = 5,
         hot_ratio: f64 = 0.2,
         warm_ratio: f64 = 0.4,
+        max_repeated_in_warm: usize = 5,
     };
 
     fn init(conf: Config) !*Self {
@@ -391,6 +397,7 @@ const ServiceTest = struct {
             .num_classes = conf.num_classes,
             .hot_ratio = conf.hot_ratio,
             .warm_ratio = conf.warm_ratio,
+            .max_repeated_in_warm = conf.max_repeated_in_warm,
         });
 
         return s;
@@ -914,8 +921,11 @@ test "cold to warm => touch in warm => move other back to cold" {
     s.asyncTouch();
     s.asyncTouch();
 
+    // touch item 2
     s.touchItem(slab1, item2);
+    try expectEqual(true, item2.atomic_flags.getInfo().is_active);
 
+    // touch item 4
     s.touchItem(slab1, item4);
     s.asyncTouch();
 
@@ -923,4 +933,48 @@ test "cold to warm => touch in warm => move other back to cold" {
     try s.expectWarmList(slab1, &.{ 32, 34 });
     try s.expectColdList(slab1, &.{ 33, 31 });
     try expectEqual(0, s.touch_list._queue.len);
+    try expectEqual(false, item2.atomic_flags.getInfo().is_active);
+}
+
+test "cold to warm => with max repeated in warm = 0" {
+    var s = try ServiceTest.init(.{
+        .hot_ratio = 0.2,
+        .warm_ratio = 0.4,
+        .max_repeated_in_warm = 0,
+    });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 34, 33, 32, 31 });
+
+    s.touchItem(slab1, item2);
+    s.touchItem(slab1, item3);
+    s.asyncTouch();
+    s.asyncTouch();
+
+    // touch item 2
+    s.touchItem(slab1, item2);
+
+    // touch item 4
+    s.touchItem(slab1, item4);
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{ 34, 33 });
+    try s.expectColdList(slab1, &.{ 32, 31 });
 }

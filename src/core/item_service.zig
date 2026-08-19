@@ -865,17 +865,16 @@ const ServiceTest = struct {
 
         const s = try gpa.create(Self);
 
-        s.gpa = gpa;
-        s.hash_func = types.FakeHashFunc.init(gpa);
-        s.slab_conf = try zslab.SlabClassConfig.init(
-            gpa,
-            96,
-            512,
-            1.5,
-        );
-        s.pager = try zpage.GlobalPager.init(io, gpa, 9, conf.num_pages);
-        s.locker = zlock.FakeItemLocks.init(gpa);
-        s.lru_svc = zlru.FakeLruService.init(gpa);
+        s.* = .{
+            .gpa = gpa,
+            .hash_func = types.FakeHashFunc.init(gpa),
+            .slab_conf = try zslab.SlabClassConfig.init(gpa, 96, 512, 1.5),
+            .pager = try zpage.GlobalPager.init(io, gpa, 9, conf.num_pages),
+            .locker = zlock.FakeItemLocks.init(gpa),
+            .lru_svc = zlru.FakeLruService.init(gpa),
+            .svc = undefined,
+            .move_items = ItemHashList.empty,
+        };
 
         s.svc = try ServiceType.init(
             io,
@@ -890,8 +889,6 @@ const ServiceTest = struct {
                 .max_evict_attempts = conf.max_evict_attempts,
             },
         );
-
-        s.move_items = ItemHashList.empty;
 
         // setup hash values
         s.hash_func.putKeyHash(key01, hash1);

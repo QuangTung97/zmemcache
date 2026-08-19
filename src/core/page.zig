@@ -57,7 +57,7 @@ pub const GlobalPager = struct {
         gpa: std.mem.Allocator,
         page_size_log: u6,
         num_pages: u64,
-    ) !Self {
+    ) !*Self {
         const page_size: u64 = @as(u64, 1) << page_size_log;
         const all_pages = try gpa.alignedAlloc(
             u8,
@@ -89,7 +89,8 @@ pub const GlobalPager = struct {
         // init all page list heads
         const all_page_heads = try gpa.alloc(ListHead, num_pages);
 
-        return .{
+        const svc = try gpa.create(Self);
+        svc.* = .{
             .priv = .{
                 .io = io,
                 .gpa = gpa,
@@ -102,12 +103,16 @@ pub const GlobalPager = struct {
                 .all_page_heads = all_page_heads,
             },
         };
+        return svc;
     }
 
     pub fn deinit(self: *Self) void {
-        self.priv.gpa.free(self.priv.all_page_heads);
-        self.priv.gpa.free(self.priv.all_pages);
-        self.priv.gpa.free(self.priv.pages_to_slab);
+        const gpa = self.priv.gpa;
+
+        gpa.free(self.priv.all_page_heads);
+        gpa.free(self.priv.all_pages);
+        gpa.free(self.priv.pages_to_slab);
+        gpa.destroy(self);
     }
 
     pub fn allocPage(self: *Self, slab: types.SlabClass) ?Page {
@@ -239,6 +244,16 @@ pub const GlobalPager = struct {
     pub fn getPageListHead(self: *Self, num: PageNum) *ListHead {
         return &self.priv.all_page_heads[num.page_num];
     }
+
+    pub fn getPageNumOfListHead(self: *Self, entry: *ListHead) PageNum {
+        const base: [*]ListHead = self.priv.all_page_heads.ptr;
+        const ptr: [*]ListHead = @ptrCast(entry);
+
+        const offset = ptr - base;
+        std.debug.assert(offset <= self.priv.all_page_heads.len);
+
+        return PageNum.init(offset);
+    }
 };
 
 // ===========================================================================
@@ -325,4 +340,18 @@ test "basic" {
     };
     g.iterateItemsOfPage(p1, 3 * 1024, &ctx, IterateCtx.yield);
     try expectEqual(341, ctx.counter); // check total
+}
+
+test "page list head" {
+    var g = try GlobalPager.init(
+        std.testing.io,
+        std.testing.allocator,
+        20,
+        3,
+    );
+    defer g.deinit();
+
+    const page1 = PageNum.init(1);
+    const entry = g.getPageListHead(page1);
+    try expectEqual(page1, g.getPageNumOfListHead(entry));
 }

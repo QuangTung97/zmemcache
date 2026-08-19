@@ -37,8 +37,14 @@ pub const ModernLru = struct {
     _io: std.Io,
     _gpa: Allocator,
     _all_classes: []SlabClassState,
+    _pager: *zpage.GlobalPager,
 
-    pub fn init(io: std.Io, gpa: Allocator, num_classes: usize) !Self {
+    pub fn init(
+        io: std.Io,
+        gpa: Allocator,
+        pager: *zpage.GlobalPager,
+        num_classes: usize,
+    ) !Self {
         zutil.runtimeAssert(num_classes <= SlabClass.MaxNumClass);
 
         const all_classes = try gpa.alloc(SlabClassState, num_classes);
@@ -78,6 +84,7 @@ pub const ModernLru = struct {
             ._io = io,
             ._gpa = gpa,
             ._all_classes = all_classes,
+            ._pager = pager,
         };
     }
 
@@ -117,13 +124,19 @@ pub const ModernLru = struct {
         // TODO
     }
 
-    pub fn pushPage(_: *Self, _: SlabClass, _: PageNum) void {
-        // TODO
+    pub fn pushPage(self: *Self, slab: SlabClass, page_num: PageNum) void {
+        const state = self.getSlabState(slab);
+        const entry = self._pager.getPageListHead(page_num);
+        state.page_list.pushBack(entry);
     }
 
-    pub fn popPage(_: *Self, _: SlabClass) ?PageNum {
-        // TODO
-        return null;
+    pub fn popPage(self: *Self, slab: SlabClass) ?PageNum {
+        const state = self.getSlabState(slab);
+        const null_entry = state.page_list.popFront();
+        const entry = null_entry orelse return null;
+
+        const page_num = self._pager.getPageNumOfListHead(entry);
+        return page_num;
     }
 
     pub fn setMovingPage(self: *Self, slab: SlabClass, page_num: ?PageNum) void {
@@ -176,6 +189,7 @@ const expectEqual = std.testing.expectEqual;
 const ServiceTest = struct {
     const Self = @This();
 
+    pager: *zpage.GlobalPager,
     svc: ModernLru,
 
     fn init() !*Self {
@@ -183,7 +197,9 @@ const ServiceTest = struct {
         const gpa = std.testing.allocator;
 
         const s = try gpa.create(Self);
-        s.svc = try ModernLru.init(io, gpa, 5);
+
+        s.pager = try zpage.GlobalPager.init(io, gpa, 10, 20);
+        s.svc = try ModernLru.init(io, gpa, s.pager, 5);
 
         return s;
     }
@@ -192,6 +208,8 @@ const ServiceTest = struct {
         self.checkInvariant();
 
         const gpa = std.testing.allocator;
+
+        self.pager.deinit();
         self.svc.deinit();
         gpa.destroy(self);
     }
@@ -230,6 +248,16 @@ const ServiceTest = struct {
         defer self.svc.unlockSlab(slab);
 
         self.svc.deleteFreeItem(slab, item);
+    }
+
+    fn pushPage(self: *Self, slab: SlabClass, num: PageNum) void {
+        defer self.checkInvariant();
+        self.svc.pushPage(slab, num);
+    }
+
+    fn popPage(self: *Self, slab: SlabClass) ?PageNum {
+        defer self.checkInvariant();
+        return self.svc.popPage(slab);
     }
 
     fn checkInvariant(_: *Self) void {}
@@ -342,4 +370,26 @@ test "moving page" {
     // set null
     s.svc.setMovingPage(slab1, null);
     try expectEqual(null, s.svc.getMovingPage(slab1));
+}
+
+test "add page" {
+    var s = try ServiceTest.init();
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+    const slab2 = SlabClass.init(2);
+
+    const page1 = PageNum.init(11);
+    const page2 = PageNum.init(12);
+
+    s.pushPage(slab1, page1);
+    s.pushPage(slab1, page2);
+
+    // pop not found
+    try expectEqual(null, s.popPage(slab2));
+
+    // pop found
+    try expectEqual(page1, s.popPage(slab1));
+    try expectEqual(page2, s.popPage(slab1));
+    try expectEqual(null, s.popPage(slab1));
 }

@@ -409,7 +409,32 @@ pub fn ItemService(
             self.doDeleteItem(&ctx, hash_value, it, pitem);
         }
 
-        pub fn startMovePage(self: *Self, from_slab: SlabClass, gpa: Allocator, delete_list: *ItemHashList) ?PageNum {
+        const MovePageIterateCtx = struct {
+            self: *Self,
+            gpa: Allocator,
+            slab: SlabClass,
+            delete_list: *ItemHashList,
+            fn yield(ctx: *@This(), item: *Item) bool {
+                if (item.slab_flags.is_present) {
+                    const hash_val = HashFunc.hashKey(ctx.self._hasher, item.getKey());
+                    const item_hash = ItemHash{
+                        .hash = hash_val,
+                        .item = .init(item),
+                    };
+                    ctx.delete_list.append(ctx.gpa, item_hash) catch unreachable;
+                } else {
+                    LruFuncs.deleteFreeItem(ctx.self._lru, ctx.slab, item);
+                }
+                return true;
+            }
+        };
+
+        pub fn startMovePage(
+            self: *Self,
+            from_slab: SlabClass,
+            gpa: Allocator,
+            delete_list: *ItemHashList,
+        ) ?PageNum {
             // lock the slab
             var lock_ctx = LockCtx.init();
             self.lockSlab(&lock_ctx, from_slab);
@@ -424,34 +449,19 @@ pub fn ItemService(
             // clear delete_list
             delete_list.clearRetainingCapacity();
 
-            const IterateCtx = struct {
-                self: *Self,
-                gpa: Allocator,
-                slab: SlabClass,
-                delete_list: *ItemHashList,
-                fn yield(ctx: *@This(), item: *Item) bool {
-                    if (item.slab_flags.is_present) {
-                        const hash_val = HashFunc.hashKey(ctx.self._hasher, item.getKey());
-                        const item_hash = ItemHash{
-                            .hash = hash_val,
-                            .item = .init(item),
-                        };
-                        ctx.delete_list.append(ctx.gpa, item_hash) catch unreachable;
-                    } else {
-                        LruFuncs.deleteFreeItem(ctx.self._lru, ctx.slab, item);
-                    }
-                    return true;
-                }
-            };
-            var ctx = IterateCtx{
+            // iterate through items of moving page
+            var iterate_ctx = MovePageIterateCtx{
                 .self = self,
                 .gpa = gpa,
                 .slab = from_slab,
                 .delete_list = delete_list,
             };
-
-            // iterate through items of moving page
-            self._pager.iterateItemsOfPage(moving_page, item_size, &ctx, IterateCtx.yield);
+            self._pager.iterateItemsOfPage(
+                moving_page,
+                item_size,
+                &iterate_ctx,
+                MovePageIterateCtx.yield,
+            );
 
             LruFuncs.setMovingPage(self._lru, from_slab, page_num);
 
@@ -837,7 +847,7 @@ const ServiceTest = struct {
     gpa: Allocator,
     hash_func: types.FakeHashFunc,
     slab_conf: SlabClassConfig,
-    pager: zpage.GlobalPager,
+    pager: *zpage.GlobalPager,
     locker: zlock.FakeItemLocks,
     lru_svc: zlru.FakeLruService,
     svc: ServiceType,
@@ -872,7 +882,7 @@ const ServiceTest = struct {
             gpa,
             &s.hash_func,
             &s.slab_conf,
-            &s.pager,
+            s.pager,
             &s.locker,
             &s.lru_svc,
             .{

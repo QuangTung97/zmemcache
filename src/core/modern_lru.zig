@@ -11,6 +11,7 @@ const PageNum = zpage.PageNum;
 const Item = types.Item;
 const ItemIter = zlru.ItemIter;
 const CasNum = types.CasNum;
+const LruList = types.LruList;
 
 pub const ModernLru = struct {
     const Self = @This();
@@ -118,12 +119,13 @@ pub const ModernLru = struct {
         std.debug.assert(item.slab_flags.is_present);
 
         const state = self.getSlabState(slab);
-        pushToList(&state.hot_list, &state.num_hot, &item.lru_list);
+        pushToList(&state.hot_list, &state.num_hot, item, .Hot);
         self.rebalanceLruLists(state);
     }
 
     pub fn touchItem(_: *Self, _: SlabClass, item: *Item) void {
         std.debug.assert(item.slab_flags.is_present);
+        _ = item.atomic_flags.setActive();
         // TODO
     }
 
@@ -142,12 +144,20 @@ pub const ModernLru = struct {
         const expected_hot: usize = @floor(total * self._conf.hot_ratio);
         while (state.num_hot > expected_hot) {
             const entry = popFromList(&state.hot_list, &state.num_hot).?;
-            pushToList(&state.cold_list, &state.num_cold, entry);
+
+            const item = Item.fromList(entry);
+            const is_active = item.atomic_flags.getInfo().is_active;
+            if (is_active) {
+                pushToList(&state.warm_list, &state.num_warm, item, .Warm);
+            } else {
+                pushToList(&state.cold_list, &state.num_cold, item, .Cold);
+            }
         }
     }
 
-    fn pushToList(head: *ListHead, counter: *usize, entry: *ListHead) void {
-        head.pushFront(entry);
+    fn pushToList(head: *ListHead, counter: *usize, item: *Item, lru_enum: LruList) void {
+        item.atomic_flags.setLru(lru_enum);
+        head.pushFront(&item.lru_list);
         counter.* += 1;
     }
 
@@ -271,6 +281,11 @@ const ServiceTest = struct {
         self.svc.putItem(slab, item);
     }
 
+    fn touchItem(self: *Self, slab: SlabClass, item: *Item) void {
+        defer self.checkInvariant();
+        self.svc.touchItem(slab, item);
+    }
+
     fn expectHotList(self: *Self, slab: SlabClass, cas_list: TestCasList) !void {
         const state = self.svc.getSlabState(slab);
         try expectCasList(self, &state.hot_list, cas_list);
@@ -356,7 +371,24 @@ const ServiceTest = struct {
         return self.svc.popPage(slab);
     }
 
-    fn checkInvariant(_: *Self) void {}
+    fn checkInvariant(self: *Self) void {
+        for (self.svc._all_classes) |*state| {
+            validateLruList(&state.hot_list, state.num_hot, .Hot);
+            validateLruList(&state.warm_list, state.num_warm, .Warm);
+            validateLruList(&state.cold_list, state.num_cold, .Cold);
+        }
+    }
+
+    fn validateLruList(head: *ListHead, counter: usize, lru_enum: LruList) void {
+        var total : usize = 0;
+        var iter = head.iterate();
+        while (iter.next()) |e| {
+            const item = Item.fromList(e);
+            std.debug.assert(item.atomic_flags.getInfo().lru == lru_enum);
+            total += 1;
+        }
+        std.debug.assert(total == counter);
+    }
 };
 
 test "slab class state size" {
@@ -506,7 +538,7 @@ test "lru, all to cold" {
 
     try s.expectHotList(slab1, &.{});
     try s.expectWarmList(slab1, &.{});
-    try s.expectColdList(slab1, &.{ 33, 32, 31});
+    try s.expectColdList(slab1, &.{ 33, 32, 31 });
 }
 
 test "lru, half to hot" {
@@ -530,5 +562,30 @@ test "lru, half to hot" {
 
     try s.expectHotList(slab1, &.{33});
     try s.expectWarmList(slab1, &.{});
-    try s.expectColdList(slab1, &.{32, 31});
+    try s.expectColdList(slab1, &.{ 32, 31 });
+}
+
+test "put to hot => touch => move to warm" {
+    var s = try ServiceTest.init(.{ .hot_ratio = 0.5 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    var item1 = s.newItem(31);
+    var item2 = s.newItem(32);
+    var item3 = s.newItem(33);
+
+    s.putItem(slab1, &item1);
+    s.putItem(slab1, &item2);
+
+    try s.expectHotList(slab1, &.{32});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{31});
+
+    s.touchItem(slab1, &item2); // touch item 2
+    s.putItem(slab1, &item3);
+
+    try s.expectHotList(slab1, &.{33});
+    try s.expectWarmList(slab1, &.{32});
+    try s.expectColdList(slab1, &.{31});
 }

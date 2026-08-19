@@ -936,11 +936,11 @@ test "cold to warm => touch in warm => move other back to cold" {
     try expectEqual(false, item2.atomic_flags.getInfo().is_active);
 }
 
-test "cold to warm => with max repeated in warm = 0" {
+test "cold to warm => with max repeated in warm = 1" {
     var s = try ServiceTest.init(.{
         .hot_ratio = 0.2,
         .warm_ratio = 0.4,
-        .max_repeated_in_warm = 0,
+        .max_repeated_in_warm = 1,
     });
     defer s.deinit();
 
@@ -967,14 +967,15 @@ test "cold to warm => with max repeated in warm = 0" {
     s.asyncTouch();
     s.asyncTouch();
 
-    // touch item 2
+    // touch item 2 & 3
     s.touchItem(slab1, item2);
+    s.touchItem(slab1, item3);
 
     // touch item 4
     s.touchItem(slab1, item4);
     s.asyncTouch();
 
     try s.expectHotList(slab1, &.{35});
-    try s.expectWarmList(slab1, &.{ 34, 33 });
-    try s.expectColdList(slab1, &.{ 32, 31 });
+    try s.expectWarmList(slab1, &.{ 32, 34 });
+    try s.expectColdList(slab1, &.{ 33, 31 });
 }

@@ -108,11 +108,15 @@ pub const ModernLru = struct {
         state.mutex.unlock(self._io);
     }
 
-    pub fn putItem(_: *Self, _: SlabClass, _: *Item) void {
-        // TODO
+    pub fn putItem(self: *Self, slab: SlabClass, item: *Item) void {
+        std.debug.assert(item.slab_flags.is_present);
+
+        const state = self.getSlabState(slab);
+        state.cold_list.pushBack(&item.lru_list);
     }
 
-    pub fn touchItem(_: *Self, _: SlabClass, _: *Item) void {
+    pub fn touchItem(_: *Self, _: SlabClass, item: *Item) void {
+        std.debug.assert(item.slab_flags.is_present);
         // TODO
     }
 
@@ -186,13 +190,17 @@ pub const ModernLru = struct {
 
 const expectEqual = std.testing.expectEqual;
 
+const TestCasList = []const u64;
+
 const ServiceTest = struct {
     const Self = @This();
 
     pager: *zpage.GlobalPager,
     svc: ModernLru,
 
-    fn init() !*Self {
+    const Config = struct {};
+
+    fn init(_: Config) !*Self {
         const io = std.testing.io;
         const gpa = std.testing.allocator;
 
@@ -212,6 +220,48 @@ const ServiceTest = struct {
         self.pager.deinit();
         self.svc.deinit();
         gpa.destroy(self);
+    }
+
+    fn newItem(_: *Self, cas: u64) Item {
+        var item: Item = undefined;
+        item.slab_flags.is_present = true;
+        item.cas_num = CasNum.init(cas);
+        return item;
+    }
+
+    fn putItem(self: *Self, slab: SlabClass, item: *Item) void {
+        defer self.checkInvariant();
+        self.svc.putItem(slab, item);
+    }
+
+    fn expectHotList(self: *Self, slab: SlabClass, cas_list: TestCasList) !void {
+        const state = self.svc.getSlabState(slab);
+        try expectCasList(self, &state.hot_list, cas_list);
+    }
+
+    fn expectWarmList(self: *Self, slab: SlabClass, cas_list: TestCasList) !void {
+        const state = self.svc.getSlabState(slab);
+        try expectCasList(self, &state.warm_list, cas_list);
+    }
+
+    fn expectColdList(self: *Self, slab: SlabClass, cas_list: TestCasList) !void {
+        const state = self.svc.getSlabState(slab);
+        try expectCasList(self, &state.cold_list, cas_list);
+    }
+
+    fn expectCasList(_: *Self, head: *ListHead, cas_list: TestCasList) !void {
+        const gpa = std.testing.allocator;
+
+        var list = std.ArrayList(u64).empty;
+        defer list.deinit(gpa);
+
+        var iter = head.iterate();
+        while (iter.next()) |x| {
+            const item = Item.fromList(x);
+            try list.append(gpa, item.cas_num.cas);
+        }
+
+        try std.testing.expectEqualSlices(u64, cas_list, list.items);
     }
 
     fn newFreeItem(_: *Self, cas: u64) Item {
@@ -273,7 +323,7 @@ test "check impl" {
 }
 
 test "locking" {
-    const s = try ServiceTest.init();
+    const s = try ServiceTest.init(.{});
     defer s.deinit();
 
     const slab0 = SlabClass.init(0);
@@ -294,7 +344,7 @@ test "locking" {
 }
 
 test "free list" {
-    var s = try ServiceTest.init();
+    var s = try ServiceTest.init(.{});
     defer s.deinit();
 
     const slab1 = SlabClass.init(1);
@@ -325,7 +375,7 @@ test "free list" {
 }
 
 test "free list, with delete" {
-    var s = try ServiceTest.init();
+    var s = try ServiceTest.init(.{});
     defer s.deinit();
 
     const slab1 = SlabClass.init(1);
@@ -353,7 +403,7 @@ test "free list, with delete" {
 }
 
 test "moving page" {
-    var s = try ServiceTest.init();
+    var s = try ServiceTest.init(.{});
     defer s.deinit();
 
     const slab1 = SlabClass.init(1);
@@ -373,7 +423,7 @@ test "moving page" {
 }
 
 test "add page" {
-    var s = try ServiceTest.init();
+    var s = try ServiceTest.init(.{});
     defer s.deinit();
 
     const slab1 = SlabClass.init(1);
@@ -392,4 +442,23 @@ test "add page" {
     try expectEqual(page1, s.popPage(slab1));
     try expectEqual(page2, s.popPage(slab1));
     try expectEqual(null, s.popPage(slab1));
+}
+
+test "lru, all to cold" {
+    var s = try ServiceTest.init(.{});
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    var item1 = s.newItem(31);
+    var item2 = s.newItem(32);
+    var item3 = s.newItem(33);
+
+    s.putItem(slab1, &item1);
+    s.putItem(slab1, &item2);
+    s.putItem(slab1, &item3);
+
+    try s.expectHotList(slab1, &.{});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{31, 32, 33});
 }

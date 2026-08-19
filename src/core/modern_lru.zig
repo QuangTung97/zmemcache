@@ -15,6 +15,33 @@ const CasNum = types.CasNum;
 const LruList = types.LruList;
 const TouchItem = ztouch.TouchItem;
 
+const LruListInfo = struct {
+    head: *ListHead,
+    counter: *usize,
+    lru_enum: LruList,
+
+    const Self = @This();
+
+    fn pushToList(self: Self, item: *Item) void {
+        item.atomic_flags.setLru(self.lru_enum);
+        self.head.pushFront(&item.lru_list);
+        self.counter.* += 1;
+    }
+
+    fn popFromList(self: LruListInfo) ?*ListHead {
+        const null_entry = self.head.popBack();
+        const entry = null_entry orelse return null;
+        self.counter.* -= 1;
+        return entry;
+    }
+
+    fn deleteFromList(self: LruListInfo, item: *Item) void {
+        std.debug.assert(item.atomic_flags.getInfo().lru == self.lru_enum);
+        item.lru_list.remove();
+        self.counter.* -= 1;
+    }
+};
+
 const SlabClassState = struct {
     mutex: std.Io.Mutex,
 
@@ -32,6 +59,37 @@ const SlabClassState = struct {
     moving_page: ?PageNum,
 
     _padding: [8 * 7]u8 = undefined,
+
+    const Self = @This();
+
+    fn getHot(self: *Self) LruListInfo {
+        return .{
+            .head = &self.hot_list,
+            .counter = &self.num_hot,
+            .lru_enum = .Hot,
+        };
+    }
+
+    fn getWarm(self: *Self) LruListInfo {
+        return .{
+            .head = &self.warm_list,
+            .counter = &self.num_warm,
+            .lru_enum = .Warm,
+        };
+    }
+
+    fn getCold(self: *Self) LruListInfo {
+        return .{
+            .head = &self.cold_list,
+            .counter = &self.num_cold,
+            .lru_enum = .Cold,
+        };
+    }
+
+    fn getTotal(self: *Self) f64 {
+        const total = self.num_hot + self.num_warm + self.num_cold;
+        return @floatFromInt(total);
+    }
 };
 
 pub fn ModernLru(
@@ -129,7 +187,7 @@ pub fn ModernLru(
             std.debug.assert(item.slab_flags.is_present);
 
             const state = self.getSlabState(slab);
-            pushToList(&state.hot_list, &state.num_hot, item, .Hot);
+            state.getHot().pushToList(item);
             self.rebalanceLruLists(state);
         }
 
@@ -169,8 +227,8 @@ pub fn ModernLru(
 
             const state = self.getSlabState(touch_item.slab);
 
-            deleteFromList(item, &state.num_cold, .Cold);
-            pushToList(&state.warm_list, &state.num_warm, item, .Warm);
+            state.getCold().deleteFromList(item);
+            state.getWarm().pushToList(item);
 
             self.rebalanceLruLists(state);
         }
@@ -211,42 +269,26 @@ pub fn ModernLru(
 
             const expected_hot: usize = @floor(total * self._conf.hot_ratio);
             while (state.num_hot > expected_hot) {
-                const entry = popFromList(&state.hot_list, &state.num_hot).?;
+                const entry = state.getHot().popFromList().?;
                 const item = Item.fromList(entry);
                 const is_active = item.atomic_flags.getInfo().is_active;
                 if (is_active) {
-                    pushToList(&state.warm_list, &state.num_warm, item, .Warm);
+                    state.getWarm().pushToList(item);
                 } else {
-                    pushToList(&state.cold_list, &state.num_cold, item, .Cold);
+                    state.getCold().pushToList(item);
                 }
             }
 
             const expected_warm: usize = @floor(total * self._conf.warm_ratio);
             while (state.num_warm > expected_warm) {
-                const entry = popFromList(&state.warm_list, &state.num_warm).?;
+                const entry = state.getWarm().popFromList().?;
                 const item = Item.fromList(entry);
-                pushToList(&state.cold_list, &state.num_cold, item, .Cold);
+                if (item.atomic_flags.getInfo().is_active) {
+                    state.getWarm().pushToList(item);
+                } else {
+                    state.getCold().pushToList(item);
+                }
             }
-        }
-
-        fn pushToList(head: *ListHead, counter: *usize, item: *Item, lru_enum: LruList) void {
-            item.atomic_flags.setLru(lru_enum);
-            head.pushFront(&item.lru_list);
-            counter.* += 1;
-        }
-
-        fn popFromList(head: *ListHead, counter: *usize) ?*ListHead {
-            const null_entry = head.popBack();
-            const entry = null_entry orelse return null;
-
-            counter.* -= 1;
-            return entry;
-        }
-
-        fn deleteFromList(item: *Item, counter: *usize, lru_enum: LruList) void {
-            std.debug.assert(item.atomic_flags.getInfo().lru == lru_enum);
-            item.lru_list.remove();
-            counter.* -= 1;
         }
 
         pub fn pushPage(self: *Self, slab: SlabClass, page_num: PageNum) void {
@@ -842,5 +884,43 @@ test "cold to warm, multi items" {
     try s.expectHotList(slab1, &.{35});
     try s.expectWarmList(slab1, &.{ 34, 33 });
     try s.expectColdList(slab1, &.{ 32, 31 });
+    try expectEqual(0, s.touch_list._queue.len);
+}
+
+test "cold to warm => touch in warm => move other back to cold" {
+    var s = try ServiceTest.init(.{ .hot_ratio = 0.2, .warm_ratio = 0.4 });
+    defer s.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    const item1 = s.newItem(slab1, 31);
+    const item2 = s.newItem(slab1, 32);
+    const item3 = s.newItem(slab1, 33);
+    const item4 = s.newItem(slab1, 34);
+    const item5 = s.newItem(slab1, 35);
+
+    s.putItem(slab1, item1);
+    s.putItem(slab1, item2);
+    s.putItem(slab1, item3);
+    s.putItem(slab1, item4);
+    s.putItem(slab1, item5);
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{});
+    try s.expectColdList(slab1, &.{ 34, 33, 32, 31 });
+
+    s.touchItem(slab1, item2);
+    s.touchItem(slab1, item3);
+    s.asyncTouch();
+    s.asyncTouch();
+
+    s.touchItem(slab1, item2);
+
+    s.touchItem(slab1, item4);
+    s.asyncTouch();
+
+    try s.expectHotList(slab1, &.{35});
+    try s.expectWarmList(slab1, &.{ 32, 34 });
+    try s.expectColdList(slab1, &.{ 33, 31 });
     try expectEqual(0, s.touch_list._queue.len);
 }

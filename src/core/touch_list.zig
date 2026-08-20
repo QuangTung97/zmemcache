@@ -250,6 +250,36 @@ test "ring buffer, full and close" {
     try expectEqual(error.Closed, err);
 }
 
+test "ring buffer, full => consume => push again" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    var b = try TouchRingBuffer.init(io, gpa, 1);
+    defer b.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    var item1 = newItem(slab1, 31);
+    var item2 = newItem(slab1, 32);
+    var item3 = newItem(slab1, 33);
+    var item4 = newItem(slab1, 34);
+
+    b.push(TouchItem.fromItem(&item1));
+    b.push(TouchItem.fromItem(&item2));
+    b.push(TouchItem.fromItem(&item3));
+
+    const touch1 = try b.pop();
+    try expectEqual(31, touch1.cas.cas);
+
+    const touch2 = try b.pop();
+    try expectEqual(32, touch2.cas.cas);
+
+    b.push(TouchItem.fromItem(&item4));
+
+    const touch3 = try b.pop();
+    try expectEqual(34, touch3.cas.cas);
+}
+
 // ===========================================================================
 // Fake Touch List
 // ===========================================================================

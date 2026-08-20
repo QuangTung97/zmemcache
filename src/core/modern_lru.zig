@@ -96,6 +96,7 @@ const SlabClassState = struct {
 pub fn ModernLru(
     TouchList: type,
     TouchListFuncs: ztouch.TouchListFuncs(TouchList),
+    comptime NumTouchList: usize,
 ) type {
     return struct {
         const Self = @This();
@@ -105,7 +106,7 @@ pub fn ModernLru(
         _all_classes: []SlabClassState,
         _pager: *zpage.GlobalPager,
         _conf: Config,
-        _touch_list: *TouchList,
+        _touch_list: [NumTouchList]*TouchList,
 
         const Config = struct {
             num_classes: usize,
@@ -118,7 +119,7 @@ pub fn ModernLru(
             io: std.Io,
             gpa: Allocator,
             pager: *zpage.GlobalPager,
-            touch_list: *TouchList,
+            touch_list: [NumTouchList]*TouchList,
             conf: Config,
         ) !Self {
             zutil.runtimeAssert(conf.num_classes <= SlabClass.MaxNumClass);
@@ -204,7 +205,8 @@ pub fn ModernLru(
                     return;
                 },
                 .IsCold => {
-                    TouchListFuncs.push(self._touch_list, .fromItem(item));
+                    const touch_list = self._touch_list[slab.slab % NumTouchList];
+                    TouchListFuncs.push(touch_list, .fromItem(item));
                 },
             }
         }
@@ -377,6 +379,7 @@ const ServiceTest = struct {
     const Service = ModernLru(
         ztouch.FakeTouchList,
         ztouch.NewTouchListFuncs(ztouch.FakeTouchList),
+        1,
     );
 
     pager: *zpage.GlobalPager,
@@ -403,7 +406,7 @@ const ServiceTest = struct {
             .svc = undefined,
         };
 
-        s.svc = try Service.init(io, gpa, s.pager, &s.touch_list, .{
+        s.svc = try Service.init(io, gpa, s.pager, .{&s.touch_list}, .{
             .num_classes = conf.num_classes,
             .hot_ratio = conf.hot_ratio,
             .warm_ratio = conf.warm_ratio,

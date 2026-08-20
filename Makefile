@@ -2,6 +2,10 @@
 test:
 	zig build test
 
+.PHONY: test-race
+test-race:
+	zig build test -Dtsan --summary all
+
 .PHONY: stat
 stat:
 	du -h -d0 .

@@ -3,11 +3,16 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-
+    const enable_tsan = b.option(
+        bool,
+        "tsan",
+        "Enable thread sanitizer",
+    ) orelse false;
 
     const zutil_mod = b.addModule("zutil", .{
         .root_source_file = b.path("src/util/root.zig"),
         .target = target,
+        .sanitize_thread = enable_tsan,
     });
 
     const zcore_mod = b.addModule("zcore", .{
@@ -16,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "zutil", .module = zutil_mod },
         },
+        .sanitize_thread = enable_tsan,
     });
 
     const wiring_mod = b.addModule("wiring", .{
@@ -24,6 +30,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "zcore", .module = zcore_mod },
         },
+        .sanitize_thread = enable_tsan,
     });
 
     const exe = b.addExecutable(.{
@@ -56,11 +63,13 @@ pub fn build(b: *std.Build) void {
 }
 
 fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module) void {
+    const run_tests = b.addRunArtifact(
+        b.addTest(.{
+            .root_module = mod,
+        }),
+    );
+
     test_step.dependOn(
-        &b.addRunArtifact(
-            b.addTest(.{
-                .root_module = mod,
-            }),
-        ).step,
+        &run_tests.step,
     );
 }

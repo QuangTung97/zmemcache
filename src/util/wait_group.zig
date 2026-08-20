@@ -77,13 +77,13 @@ test "with concurrent" {
     wg.add(3);
 
     var task1 = try io.concurrent(runInParallel, .{ &wg, &total });
-    defer task1.cancel(io);
+    defer task1.await(io);
 
     var task2 = try io.concurrent(runInParallel, .{ &wg, &total });
-    defer task2.cancel(io);
+    defer task2.await(io);
 
     var task3 = try io.concurrent(runInParallel, .{ &wg, &total });
-    defer task3.cancel(io);
+    defer task3.await(io);
 
     wg.wait();
 

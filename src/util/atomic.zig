@@ -20,6 +20,10 @@ pub fn Value(T: type) type {
             self._value.store(value, .seq_cst);
         }
 
+        pub fn swap(self: *Self, value: T) T {
+            return self._value.swap(value, .seq_cst);
+        }
+
         pub fn fetchAdd(self: *Self, num: T) T {
             return self._value.fetchAdd(num, .seq_cst);
         }
@@ -51,4 +55,7 @@ test "normal" {
 
     try std.testing.expectEqual(14, v.fetchSub(3));
     try std.testing.expectEqual(11, v.load());
+
+    try std.testing.expectEqual(11, v.swap(21));
+    try std.testing.expectEqual(21, v.load());
 }

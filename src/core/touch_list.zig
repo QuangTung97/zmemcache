@@ -108,7 +108,12 @@ pub const TouchRingBuffer = struct {
 
             const entry = self.getEntry(seq);
             entry.touch_item = item;
-            entry.next.store(RingEntry.Linked);
+
+            const prev_next = entry.next.swap(RingEntry.Linked);
+            if (prev_next == RingEntry.ConsumeWait) {
+                self._sema.up();
+            }
+
             return;
         }
     }
@@ -163,7 +168,8 @@ test "ring entry size" {
 }
 
 test "ring buffer impl" {
-    // TODO
+    const impl = NewTouchListFuncs(TouchRingBuffer);
+    _ = impl;
 }
 
 test "ring buffer, simple push and pop" {
@@ -191,6 +197,57 @@ test "ring buffer, simple push and pop" {
 
     const touch3 = try b.pop();
     try expectEqual(33, touch3.cas.cas);
+}
+
+fn ringBufferTest02Background(b: *TouchRingBuffer, item: *Item) void {
+    b.push(TouchItem.fromItem(item));
+}
+
+test "ring buffer, with paralel" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    var b = try TouchRingBuffer.init(io, gpa, 3);
+    defer b.deinit();
+
+    const slab1 = SlabClass.init(1);
+    var item1 = newItem(slab1, 31);
+
+    for (0..1000) |_| {
+        var task1 = try io.concurrent(ringBufferTest02Background, .{ &b, &item1 });
+        defer task1.cancel(io);
+
+        const touch1 = try b.pop();
+        try expectEqual(31, touch1.cas.cas);
+    }
+}
+
+test "ring buffer, full and close" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    var b = try TouchRingBuffer.init(io, gpa, 1);
+    defer b.deinit();
+
+    const slab1 = SlabClass.init(1);
+
+    var item1 = newItem(slab1, 31);
+    var item2 = newItem(slab1, 32);
+    var item3 = newItem(slab1, 33);
+
+    b.push(TouchItem.fromItem(&item1));
+    b.push(TouchItem.fromItem(&item2));
+    b.push(TouchItem.fromItem(&item3));
+    b.close();
+
+    const touch1 = try b.pop();
+    try expectEqual(31, touch1.cas.cas);
+
+    const touch2 = try b.pop();
+    try expectEqual(32, touch2.cas.cas);
+
+    const err = b.pop();
+    try expectEqual(error.Closed, err);
 }
 
 // ===========================================================================

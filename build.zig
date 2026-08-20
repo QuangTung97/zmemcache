@@ -18,6 +18,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const wiring_mod = b.addModule("wiring", .{
+        .root_source_file = b.path("src/wiring/root.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "zcore", .module = zcore_mod },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "zmemcache",
         .root_module = b.createModule(.{
@@ -44,6 +52,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     addTestModule(b, test_step, zcore_mod);
     addTestModule(b, test_step, zutil_mod);
+    addTestModule(b, test_step, wiring_mod);
 }
 
 fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module) void {

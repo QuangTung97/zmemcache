@@ -4,7 +4,7 @@ test:
 
 .PHONY: test-race
 test-race:
-	zig build test -Dtsan --summary all
+	zig build test -Dtsan
 
 .PHONY: stat
 stat:

@@ -42,7 +42,9 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "zcore", .module = zcore_mod },
             },
+            .sanitize_thread = enable_tsan,
         }),
+        .use_llvm = enable_tsan,
     });
 
     b.installArtifact(exe);
@@ -57,15 +59,16 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run tests");
-    addTestModule(b, test_step, zcore_mod);
-    addTestModule(b, test_step, zutil_mod);
-    addTestModule(b, test_step, wiring_mod);
+    addTestModule(b, test_step, zcore_mod, enable_tsan);
+    addTestModule(b, test_step, zutil_mod, enable_tsan);
+    addTestModule(b, test_step, wiring_mod, enable_tsan);
 }
 
-fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module) void {
+fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module, enable_tsan: bool) void {
     const run_tests = b.addRunArtifact(
         b.addTest(.{
             .root_module = mod,
+            .use_llvm = enable_tsan,
         }),
     );
 

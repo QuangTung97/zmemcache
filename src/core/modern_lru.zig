@@ -190,6 +190,7 @@ pub fn ModernLru(
 
             const state = self.getSlabState(slab);
             state.getHot().pushToList(item);
+
             self.rebalanceLruLists(state);
         }
 

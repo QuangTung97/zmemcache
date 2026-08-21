@@ -133,6 +133,8 @@ pub const Item = struct {
     // key data & item data are protected by item lock
 
     pub fn init(slab: SlabClass, key_len: usize, value_len: usize, cas: CasNum) Self {
+        std.debug.assert(key_len > 0);
+
         const it: Self = .{
             .slab_flags = SlabFlags{
                 .is_present = true,

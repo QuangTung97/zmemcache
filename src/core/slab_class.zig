@@ -111,7 +111,7 @@ pub const SlabClassConfig = struct {
                 return index;
             }
         }
-        @panic("item size is too big");
+        std.debug.panic("item size {} is too big", .{key});
     }
 
     pub fn getAllSlabClasses(self: *const Self) SlabSizeIter {

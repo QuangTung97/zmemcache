@@ -42,6 +42,7 @@ pub const SystemRoot = struct {
         max_repeated_in_warm: usize = 5,
     };
 
+    io: std.Io,
     gpa: Allocator,
     hasher: Hasher,
     slab_conf: *zcore.slab_class.SlabClassConfig,
@@ -50,6 +51,7 @@ pub const SystemRoot = struct {
     touch_list: *TouchList,
     lru: LruSvc,
     item_svc: ItemSvc,
+    group_run: std.Io.Group,
 
     pub fn init(io: std.Io, gpa: Allocator, config: Config) !*Self {
         const page_size = @as(u64, 1) << config.page_size_log2;
@@ -78,6 +80,7 @@ pub const SystemRoot = struct {
 
         const root = try gpa.create(Self);
         root.* = .{
+            .io = io,
             .gpa = gpa,
             .hasher = Hasher.init(io),
             .slab_conf = slab_conf,
@@ -101,6 +104,7 @@ pub const SystemRoot = struct {
                 },
             ),
             .item_svc = undefined,
+            .group_run = .init,
         };
 
         root.item_svc = try ItemSvc.init(
@@ -116,10 +120,26 @@ pub const SystemRoot = struct {
             },
         );
 
+        // run background thread
+        try root.group_run.concurrent(io, runTouchRunner, .{root});
+
         return root;
     }
 
+    fn runTouchRunner(self: *Self) void {
+        while (true) {
+            const err_item = self.touch_list.pop();
+            const touch_item = err_item catch return;
+            self.lru.asyncTouchItem(touch_item);
+        }
+    }
+
     pub fn deinit(self: *Self) void {
+        // close touch list
+        self.touch_list.close();
+
+        self.group_run.cancel(self.io);
+
         self.item_svc.deinit();
         self.lru.deinit();
 
@@ -153,6 +173,7 @@ test "simple get set" {
     const svc = &root.item_svc;
 
     const key01 = "test_key01";
+    const key02 = "test_key02";
     const value01 = "test_value_01";
 
     // get not found
@@ -172,4 +193,8 @@ test "simple get set" {
     try std.testing.expectEqualStrings(value01, getter1.Found.item.getValue());
 
     svc.finishGet(getter1.Found);
+
+    // get key02
+    const getter2 = svc.get(key02);
+    try expectEqual(ItemGetter.NotFound, std.meta.activeTag(getter2));
 }

@@ -7,17 +7,17 @@ const Allocator = std.mem.Allocator;
 pub const SystemRoot = struct {
     const Self = @This();
 
-    const Hasher = zcore.types.RealHashFunc;
-    const ItemLocks = zcore.item_lock.ItemLockService;
-    const TouchList = zcore.touch_list.TouchRingBuffer;
+    pub const Hasher = zcore.types.RealHashFunc;
+    pub const ItemLocks = zcore.item_lock.ItemLockService;
+    pub const TouchList = zcore.touch_list.TouchRingBuffer;
 
-    const LruSvc = zcore.modern_lru.ModernLru(
+    pub const LruSvc = zcore.modern_lru.ModernLru(
         TouchList,
         zcore.touch_list.NewTouchListFuncs(TouchList),
         1,
     );
 
-    const ItemSvc = zcore.item_service.ItemService(
+    pub const ItemSvc = zcore.item_service.ItemService(
         Hasher,
         ItemLocks,
         LruSvc,

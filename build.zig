@@ -41,7 +41,9 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "zutil", .module = zutil_mod },
                 .{ .name = "zcore", .module = zcore_mod },
+                .{ .name = "wiring", .module = wiring_mod },
             },
             .sanitize_thread = enable_tsan,
         }),

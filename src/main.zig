@@ -51,7 +51,7 @@ fn runWritingThread(
     const rand = prng.random();
 
     for (0..num_write_loop) |_| {
-        const index = rand.uintLessThan(usize, all_keys.len);
+        const index = rand.uintLessThan(usize, all_keys.len / 3);
         const key = all_keys[index];
 
         const value_len = rand.uintLessThan(usize, write_buffer.len);
@@ -120,7 +120,7 @@ pub fn main() !void {
 
     const duration = start_time.untilNow(io, .real);
     std.debug.print("Total time: {}ms\n", .{duration.toMilliseconds()});
-    std.debug.print( "Not Found: {}\n", .{not_found_total.load(.seq_cst)});
-    std.debug.print( "Set Partial: {}\n", .{set_partial_total.load(.seq_cst)});
-    std.debug.print( "Ring Buffer Exceeded Total: {}\n", .{root.touch_list.exceeded_count.load()});
+    std.debug.print("Not Found: {}\n", .{not_found_total.load(.seq_cst)});
+    std.debug.print("Set Partial: {}\n", .{set_partial_total.load(.seq_cst)});
+    std.debug.print("Ring Buffer Exceeded Total: {}\n", .{root.touch_list.exceeded_count.load()});
 }

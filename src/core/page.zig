@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const types = @import("types.zig");
 const zutil = @import("zutil");
@@ -31,6 +32,18 @@ pub const PageNum = struct {
 
 pub const AtomicSlabNull = std.math.maxInt(u64);
 
+fn fillAllPagesWithRandom(io: std.Io, all_pages: []u8) void {
+    const current_time = std.Io.Clock.real.now(io);
+    const seed: u64 = @intCast(current_time.toNanoseconds());
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    for (all_pages) |*x| {
+        x.* = rand.int(u8);
+    }
+}
+
 pub const GlobalPager = struct {
     const Self = @This();
     const AtomicSlab = zatomic.Value(u64);
@@ -62,19 +75,10 @@ pub const GlobalPager = struct {
         );
         std.debug.assertAligned(all_pages, Item.Alignment);
 
-        // fill all pages with random value
-        std.debug.assert(blk: {
-            const current_time = std.Io.Clock.real.now(io);
-            const seed: u64 = @intCast(current_time.toNanoseconds());
-
-            var prng = std.Random.DefaultPrng.init(seed);
-            const rand = prng.random();
-
-            for (all_pages) |*x| {
-                x.* = rand.int(u8);
-            }
-            break :blk true;
-        });
+        if (builtin.mode == .Debug) {
+            // fill all pages with random value in debug
+            fillAllPagesWithRandom(io, all_pages);
+        }
 
         // init page to slab array
         const pages_to_slab = try gpa.alloc(AtomicSlab, num_pages);

@@ -2,15 +2,15 @@ const std = @import("std");
 const zutil = @import("zutil");
 const wiring = @import("wiring");
 
-const num_keys = 1 << 10;
+const num_keys = 1 << 14;
 const max_key_len = 50;
 
-const num_read_thread = 10;
-const num_read_loop = 5_000_000;
+const num_read_thread = 12;
+const num_read_loop = 50_000_000;
 
 const write_first = true;
 const num_write_thread = 1;
-const num_write_loop = 10_000;
+const num_write_loop = 10 * num_keys;
 const max_value_len = 1024;
 
 var not_found_total = std.atomic.Value(u64).init(0);

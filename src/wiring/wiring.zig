@@ -136,13 +136,40 @@ pub const SystemRoot = struct {
     }
 };
 
-test "system root" {
+const ItemGetter = zcore.item_service.ItemGetter;
+
+const expectEqual = std.testing.expectEqual;
+
+test "simple get set" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
 
-    const root = try SystemRoot.init(io, gpa, .{
-        .num_pages = 100, // 100MB
-        .num_items_log2 = 20, // 1 million elements
+    var root = try SystemRoot.init(io, gpa, .{
+        .num_pages = 10, // 10MB
+        .num_items_log2 = 18, // 2^18 elements
     });
     defer root.deinit();
+
+    const svc = &root.item_svc;
+
+    const key01 = "test_key01";
+    const value01 = "test_value_01";
+
+    // get not found
+    var getter1 = svc.get(key01);
+    try expectEqual(ItemGetter.NotFound, std.meta.activeTag(getter1));
+
+    // set
+    const setter1 = svc.put(key01, value01.len).?;
+    @memcpy(setter1.item.getValue(), value01);
+    svc.finishPut(setter1);
+
+    // get again
+    getter1 = svc.get(key01);
+    try expectEqual(ItemGetter.Found, std.meta.activeTag(getter1));
+
+    try std.testing.expectEqualStrings(key01, getter1.Found.item.getKey());
+    try std.testing.expectEqualStrings(value01, getter1.Found.item.getValue());
+
+    svc.finishGet(getter1.Found);
 }

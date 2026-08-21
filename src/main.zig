@@ -6,10 +6,9 @@ const num_keys = 1 << 14;
 const max_key_len = 50;
 
 const num_read_thread = 6;
-const num_read_loop = 100_000_000;
+const num_read_loop = 10_000_000;
+const read_ratio = 3;
 
-const write_first = true;
-const num_write_thread = 1;
 const num_write_loop = 10 * num_keys;
 const max_value_len = 1024;
 
@@ -25,7 +24,7 @@ fn runReadingThread(
     const rand = prng.random();
 
     for (0..num_read_loop) |_| {
-        const index = rand.uintLessThan(usize, all_keys.len);
+        const index = rand.uintLessThan(usize, all_keys.len / read_ratio);
         const key = all_keys[index];
 
         const getter = svc.get(key);
@@ -51,7 +50,7 @@ fn runWritingThread(
     const rand = prng.random();
 
     for (0..num_write_loop) |_| {
-        const index = rand.uintLessThan(usize, all_keys.len / 3);
+        const index = rand.uintLessThan(usize, all_keys.len);
         const key = all_keys[index];
 
         const value_len = rand.uintLessThan(usize, write_buffer.len);
@@ -80,9 +79,6 @@ pub fn main() !void {
     const init_duration = init_start.untilNow(io, .real);
     std.debug.print("Init duration: {}ms\n", .{init_duration.toMilliseconds()});
 
-    var group = std.Io.Group.init;
-    defer group.cancel(io);
-
     const io_source = std.Random.IoSource{ .io = io };
     const rand = io_source.interface();
 
@@ -101,25 +97,30 @@ pub fn main() !void {
     // run in parallel
     const svc = &root.item_svc;
 
-    const start_time = std.Io.Clock.now(.real, io);
+    // write data
+    const start_write_time = std.Io.Clock.now(.real, io);
+    runWritingThread(svc, rand, all_keys);
+    const write_duration = start_write_time.untilNow(io, .real);
+    std.debug.print("Total write time: {}ms, QPS: {}\n", .{
+        write_duration.toMilliseconds(),
+        @divFloor(num_write_loop * 1000, write_duration.toMilliseconds()),
+    });
 
-    if (write_first) {
-        runWritingThread(svc, rand, all_keys);
-    } else {
-        for (0..num_write_thread) |_| {
-            try group.concurrent(io, runWritingThread, .{ svc, rand, all_keys });
-        }
-    }
-
+    // read in multi threads
+    const start_read_time = std.Io.Clock.now(.real, io);
+    var group = std.Io.Group.init;
+    defer group.cancel(io);
     for (0..num_read_thread) |_| {
         try group.concurrent(io, runReadingThread, .{ svc, rand, all_keys });
     }
-
-    // wait for all threads
     try group.await(io);
 
-    const duration = start_time.untilNow(io, .real);
-    std.debug.print("Total time: {}ms\n", .{duration.toMilliseconds()});
+    // print duration
+    const read_duration = start_read_time.untilNow(io, .real);
+    std.debug.print("Total read time: {}ms, QPS: {}\n", .{
+        read_duration.toMilliseconds(),
+        @divFloor(num_read_loop * num_read_thread * 1000, read_duration.toMilliseconds()),
+    });
     std.debug.print("Not Found: {}\n", .{not_found_total.load(.seq_cst)});
     std.debug.print("Set Partial: {}\n", .{set_partial_total.load(.seq_cst)});
     std.debug.print("Ring Buffer Exceeded Total: {}\n", .{root.touch_list.exceeded_count.load()});

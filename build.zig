@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
         bool,
         "tsan",
         "Enable thread sanitizer",
-    ) orelse false;
+    );
 
     const zutil_mod = b.addModule("zutil", .{
         .root_source_file = b.path("src/util/root.zig"),
@@ -48,7 +48,6 @@ pub fn build(b: *std.Build) void {
             .sanitize_thread = enable_tsan,
             .omit_frame_pointer = if (optimize == .Debug) false else null,
         }),
-        .use_llvm = enable_tsan,
     });
 
     b.installArtifact(exe);
@@ -68,7 +67,7 @@ pub fn build(b: *std.Build) void {
     addTestModule(b, test_step, wiring_mod, enable_tsan);
 }
 
-fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module, enable_tsan: bool) void {
+fn addTestModule(b: *std.Build, test_step: *std.Build.Step, mod: *std.Build.Module, enable_tsan: ?bool) void {
     const run_tests = b.addRunArtifact(
         b.addTest(.{
             .root_module = mod,

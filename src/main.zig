@@ -6,7 +6,7 @@ const num_keys = 1 << 14;
 const max_key_len = 50;
 
 const num_read_thread = 12;
-const num_read_loop = 100_000_000;
+const num_read_loop = 400_000_000;
 const read_ratio = 3;
 
 const num_write_loop = 100 * num_keys;

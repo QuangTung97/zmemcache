@@ -2,8 +2,13 @@ const std = @import("std");
 const zutil = @import("zutil");
 const wiring = @import("wiring");
 
-const num_thread = 2;
-const num_loop = 1000_000;
+const num_keys = 1 << 10;
+
+const num_read_thread = 4;
+const num_read_loop = 1000_000;
+
+const num_write_thread = 2;
+const num_write_loop = 100_000;
 
 fn runReadingThread(
     svc: *wiring.SystemRoot.ItemSvc,
@@ -13,7 +18,7 @@ fn runReadingThread(
     var prng = std.Random.DefaultPrng.init(root_rand.int(u64));
     const rand = prng.random();
 
-    for (0..num_loop) |_| {
+    for (0..num_read_loop) |_| {
         const index = rand.uintLessThan(usize, all_keys.len);
         const key = all_keys[index];
 
@@ -51,7 +56,7 @@ fn runWritingThread(
 
     var write_buffer: [16 * 1024]u8 = undefined;
 
-    for (0..num_loop) |_| {
+    for (0..num_write_loop) |_| {
         const index = rand.uintLessThan(usize, all_keys.len);
         const key = all_keys[index];
 
@@ -82,7 +87,7 @@ pub fn main() !void {
     const io = threaded.io();
 
     var root = try wiring.SystemRoot.init(io, gpa, .{
-        .num_pages = 10, // 10MB
+        .num_pages = 100, // 100MB
     });
     defer root.deinit();
 
@@ -93,7 +98,7 @@ pub fn main() !void {
     const rand = io_source.interface();
 
     // init random keys
-    const all_keys = try gpa.alloc([]u8, 100);
+    const all_keys = try gpa.alloc([]u8, num_keys);
     defer gpa.free(all_keys);
     for (all_keys) |*key| {
         const key_len = rand.intRangeAtMost(u8, 1, 255);
@@ -106,10 +111,10 @@ pub fn main() !void {
 
     // run in parallel
     const svc = &root.item_svc;
-    for (0..num_thread) |_| {
+    for (0..num_read_thread) |_| {
         try group.concurrent(io, runReadingThread, .{ svc, rand, all_keys });
     }
-    for (0..num_thread) |_| {
+    for (0..num_write_thread) |_| {
         try group.concurrent(io, runWritingThread, .{ svc, rand, all_keys });
     }
 

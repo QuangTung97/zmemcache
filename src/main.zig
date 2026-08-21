@@ -5,11 +5,11 @@ const wiring = @import("wiring");
 const num_keys = 1 << 14;
 const max_key_len = 50;
 
-const num_read_thread = 6;
-const num_read_loop = 10_000_000;
+const num_read_thread = 12;
+const num_read_loop = 100_000_000;
 const read_ratio = 3;
 
-const num_write_loop = 10 * num_keys;
+const num_write_loop = 100 * num_keys;
 const max_value_len = 1024;
 
 var not_found_total = std.atomic.Value(u64).init(0);
@@ -123,5 +123,12 @@ pub fn main() !void {
     });
     std.debug.print("Not Found: {}\n", .{not_found_total.load(.seq_cst)});
     std.debug.print("Set Partial: {}\n", .{set_partial_total.load(.seq_cst)});
-    std.debug.print("Ring Buffer Exceeded Total: {}\n", .{root.touch_list.exceeded_count.load()});
+
+    // print exceeded total
+    const exceeded_count_f64: f64 = @floatFromInt(root.touch_list.exceeded_count.load());
+    const num_get_count: f64 = num_read_loop * num_read_thread;
+    std.debug.print("Ring Buffer Exceeded Total: {}, ratio: {d:.2}%\n", .{
+        root.touch_list.exceeded_count.load(),
+        exceeded_count_f64 * 100 / num_get_count,
+    });
 }

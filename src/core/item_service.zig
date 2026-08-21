@@ -188,6 +188,25 @@ const LockCtx = struct {
     }
 };
 
+fn equalBytes(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) {
+        return false;
+    }
+    for (a, b) |x, y| {
+        if (x != y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+test "equal bytes" {
+    try expectEqual(true, equalBytes("", ""));
+    try expectEqual(true, equalBytes("abc", "abc"));
+    try expectEqual(false, equalBytes("abc", "abcd"));
+    try expectEqual(false, equalBytes("hello01", "hello02"));
+}
+
 pub fn ItemService(
     H: type,
     L: type,
@@ -740,7 +759,7 @@ pub fn ItemService(
 
             var pitem = self._table.getBucket(hash);
             while (pitem.*) |it| {
-                if (std.mem.eql(u8, it.getKey(), key)) {
+                if (equalBytes(it.getKey(), key)) {
                     return pitem;
                 }
                 pitem = &it.hash_next;

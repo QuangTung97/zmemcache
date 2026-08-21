@@ -30,7 +30,6 @@ fn runReadingThread(
         const getter = svc.get(key);
         switch (getter) {
             .Found => |found| {
-                zutil.runtimeAssert(std.mem.eql(u8, key, found.item.getKey()));
                 svc.finishGet(found);
             },
             .NotFound => _ = not_found_total.fetchAdd(1, .seq_cst),

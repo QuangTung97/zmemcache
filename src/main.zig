@@ -5,11 +5,16 @@ const wiring = @import("wiring");
 const num_keys = 1 << 10;
 const max_key_len = 50;
 
-const num_read_thread = 4;
-const num_read_loop = 10_000_000;
+const num_read_thread = 10;
+const num_read_loop = 5_000_000;
 
-const num_write_thread = 2;
-const num_write_loop = 100_000;
+const write_first = true;
+const num_write_thread = 1;
+const num_write_loop = 10_000;
+const max_value_len = 1024;
+
+var not_found_total = std.atomic.Value(u64).init(0);
+var set_partial_total = std.atomic.Value(u64).init(0);
 
 fn runReadingThread(
     svc: *wiring.SystemRoot.ItemSvc,
@@ -29,13 +34,13 @@ fn runReadingThread(
                 zutil.runtimeAssert(std.mem.eql(u8, key, found.item.getKey()));
                 svc.finishGet(found);
             },
-            .NotFound => continue,
-            .SetPartial => continue,
+            .NotFound => _ = not_found_total.fetchAdd(1, .seq_cst),
+            .SetPartial => _ = set_partial_total.fetchAdd(1, .seq_cst),
         }
     }
 }
 
-var write_buffer: [16 * 1024]u8 = @splat(33);
+var write_buffer: [max_value_len]u8 = @splat(33);
 
 fn runWritingThread(
     svc: *wiring.SystemRoot.ItemSvc,
@@ -67,10 +72,13 @@ pub fn main() !void {
     var threaded = std.Io.Threaded.init(gpa, .{});
     const io = threaded.io();
 
+    const init_start = std.Io.Clock.now(.real, io);
     var root = try wiring.SystemRoot.init(io, gpa, .{
         .num_pages = 100, // 100MB
     });
     defer root.deinit();
+    const init_duration = init_start.untilNow(io, .real);
+    std.debug.print("Init duration: {}ms\n", .{init_duration.toMilliseconds()});
 
     var group = std.Io.Group.init;
     defer group.cancel(io);
@@ -92,13 +100,26 @@ pub fn main() !void {
 
     // run in parallel
     const svc = &root.item_svc;
+
+    const start_time = std.Io.Clock.now(.real, io);
+
+    if (write_first) {
+        runWritingThread(svc, rand, all_keys);
+    } else {
+        for (0..num_write_thread) |_| {
+            try group.concurrent(io, runWritingThread, .{ svc, rand, all_keys });
+        }
+    }
+
     for (0..num_read_thread) |_| {
         try group.concurrent(io, runReadingThread, .{ svc, rand, all_keys });
-    }
-    for (0..num_write_thread) |_| {
-        try group.concurrent(io, runWritingThread, .{ svc, rand, all_keys });
     }
 
     // wait for all threads
     try group.await(io);
+
+    const duration = start_time.untilNow(io, .real);
+    std.debug.print("Total time: {}ms\n", .{duration.toMilliseconds()});
+    std.debug.print( "Not Found: {}\n", .{not_found_total.load(.seq_cst)});
+    std.debug.print( "Set Partial: {}\n", .{set_partial_total.load(.seq_cst)});
 }

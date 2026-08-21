@@ -27,7 +27,6 @@ pub const SystemRoot = struct {
 
     pub const Config = struct {
         num_pages: u64,
-        num_items_log2: u6, // should equal log2 of number of items
 
         page_size_log2: u6 = 20, // 1MB
 
@@ -55,6 +54,9 @@ pub const SystemRoot = struct {
 
     pub fn init(io: std.Io, gpa: Allocator, config: Config) !*Self {
         const page_size = @as(u64, 1) << config.page_size_log2;
+        const avg_num_items = (page_size * config.num_pages) / (config.min_slab_size * 2);
+        const num_items_log2: u6 = std.math.log2_int_ceil(u63, @intCast(avg_num_items));
+        const num_mutex_log2 = @min(config.num_mutex_log2, num_items_log2);
 
         const slab_conf = try gpa.create(zcore.slab_class.SlabClassConfig);
         slab_conf.* = try zcore.slab_class.SlabClassConfig.init(
@@ -88,7 +90,7 @@ pub const SystemRoot = struct {
             .locker = try zcore.item_lock.ItemLockService.init(
                 io,
                 gpa,
-                config.num_mutex_log2,
+                num_mutex_log2,
             ),
             .touch_list = touch_list,
             .lru = try LruSvc.init(
@@ -116,7 +118,7 @@ pub const SystemRoot = struct {
             &root.locker,
             &root.lru,
             .{
-                .hash_size_log = config.num_items_log2,
+                .hash_size_log = num_items_log2,
             },
         );
 
@@ -166,7 +168,6 @@ test "simple get set" {
 
     var root = try SystemRoot.init(io, gpa, .{
         .num_pages = 10, // 10MB
-        .num_items_log2 = 18, // 2^18 elements
     });
     defer root.deinit();
 

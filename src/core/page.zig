@@ -35,22 +35,18 @@ pub const GlobalPager = struct {
     const Self = @This();
     const AtomicSlab = zatomic.Value(u64);
 
-    priv: struct {
-        _before_padding: CachePadding = undefined,
-        io: std.Io,
-        gpa: std.mem.Allocator,
+    _io: std.Io,
+    _gpa: std.mem.Allocator,
+    _page_size: u64,
+    _page_size_shift: u6,
+    _all_pages: []align(ItemAlignBytes) u8,
 
-        page_size: u64,
-        page_size_shift: u6,
+    _padding1: CachePadding = undefined,
 
-        all_pages: []align(ItemAlignBytes) u8,
-        num_empty_pages: zatomic.Value(u64),
-        mut: std.Io.Mutex,
-        pages_to_slab: []AtomicSlab,
-        all_page_heads: []ListHead,
-
-        _after_padding: CachePadding = undefined,
-    },
+    _num_empty_pages: zatomic.Value(u64),
+    _mut: std.Io.Mutex,
+    _pages_to_slab: []AtomicSlab,
+    _all_page_heads: []ListHead,
 
     pub fn init(
         io: std.Io,
@@ -91,93 +87,87 @@ pub const GlobalPager = struct {
 
         const svc = try gpa.create(Self);
         svc.* = .{
-            .priv = .{
-                .io = io,
-                .gpa = gpa,
-                .page_size = page_size,
-                .page_size_shift = page_size_log,
-                .all_pages = all_pages,
-                .num_empty_pages = .init(num_pages),
-                .mut = .init,
-                .pages_to_slab = pages_to_slab,
-                .all_page_heads = all_page_heads,
-            },
+            ._io = io,
+            ._gpa = gpa,
+            ._page_size = page_size,
+            ._page_size_shift = page_size_log,
+            ._all_pages = all_pages,
+            ._num_empty_pages = .init(num_pages),
+            ._mut = .init,
+            ._pages_to_slab = pages_to_slab,
+            ._all_page_heads = all_page_heads,
         };
         return svc;
     }
 
     pub fn deinit(self: *Self) void {
-        const gpa = self.priv.gpa;
+        const gpa = self._gpa;
 
-        gpa.free(self.priv.all_page_heads);
-        gpa.free(self.priv.all_pages);
-        gpa.free(self.priv.pages_to_slab);
+        gpa.free(self._all_page_heads);
+        gpa.free(self._all_pages);
+        gpa.free(self._pages_to_slab);
         gpa.destroy(self);
     }
 
     pub fn allocPage(self: *Self, slab: types.SlabClass) ?Page {
-        const this = &self.priv;
-
-        var num_empty = this.num_empty_pages.load();
+        var num_empty = self._num_empty_pages.load();
         if (num_empty == 0) {
             return null;
         }
 
         // lock the mutex
-        this.mut.lockUncancelable(this.io);
-        defer this.mut.unlock(this.io);
+        self._mut.lockUncancelable(self._io);
+        defer self._mut.unlock(self._io);
 
         // check again
-        num_empty = this.num_empty_pages.load();
+        num_empty = self._num_empty_pages.load();
         if (num_empty == 0) {
             return null;
         }
 
-        const num_pages = this.pages_to_slab.len;
+        const num_pages = self._pages_to_slab.len;
         const index = num_pages - num_empty;
-        this.num_empty_pages.store(num_empty - 1);
+        self._num_empty_pages.store(num_empty - 1);
 
         const page_num = PageNum{ .page_num = index };
         self.updatePageSlab(page_num, slab);
 
-        const offset_start = index << self.priv.page_size_shift;
-        const offset_end = offset_start + self.priv.page_size;
-        return @alignCast(this.all_pages[offset_start..offset_end]);
+        const offset_start = index << self._page_size_shift;
+        const offset_end = offset_start + self._page_size;
+        return @alignCast(self._all_pages[offset_start..offset_end]);
     }
 
     pub fn getPageNumOfItem(self: *const Self, item: *Item) PageNum {
-        const this = self.priv;
         const item_addr: [*]u8 = item.toItemAddr();
-        const offset = item_addr - this.all_pages.ptr;
-        const page_num = offset >> self.priv.page_size_shift;
+        const offset = item_addr - self._all_pages.ptr;
+        const page_num = offset >> self._page_size_shift;
         return .{ .page_num = page_num };
     }
 
     pub fn getPageNumOfPage(self: *const Self, page: Page) PageNum {
-        const offset = page.ptr - self.priv.all_pages.ptr;
-        const page_num = offset >> self.priv.page_size_shift;
+        const offset = page.ptr - self._all_pages.ptr;
+        const page_num = offset >> self._page_size_shift;
         return .{ .page_num = page_num };
     }
 
     pub fn getPageOfPageNum(self: *const Self, page_num: PageNum) Page {
-        const start_offset = page_num.page_num * self.priv.page_size;
-        const end_offset = start_offset + self.priv.page_size;
-        return @alignCast(self.priv.all_pages[start_offset..end_offset]);
+        const start_offset = page_num.page_num * self._page_size;
+        const end_offset = start_offset + self._page_size;
+        return @alignCast(self._all_pages[start_offset..end_offset]);
     }
 
     pub fn updatePageSlab(self: *Self, page_num: PageNum, slab: ?types.SlabClass) void {
-        const this = &self.priv;
-        const num_pages = this.pages_to_slab.len;
+        const num_pages = self._pages_to_slab.len;
         std.debug.assert(page_num.page_num < num_pages);
         if (slab) |s| {
-            this.pages_to_slab[page_num.page_num].store(s.slab);
+            self._pages_to_slab[page_num.page_num].store(s.slab);
         } else {
-            this.pages_to_slab[page_num.page_num].store(AtomicSlabNull);
+            self._pages_to_slab[page_num.page_num].store(AtomicSlabNull);
         }
     }
 
     pub fn getSlabClass(self: *const Self, page_num: PageNum) ?types.SlabClass {
-        const slab_num = self.priv.pages_to_slab[page_num.page_num].load();
+        const slab_num = self._pages_to_slab[page_num.page_num].load();
         if (slab_num == AtomicSlabNull) {
             return null;
         }
@@ -197,7 +187,7 @@ pub const GlobalPager = struct {
     ) void {
         std.debug.assertAligned(page, Item.Alignment);
         std.debug.assert(Item.Alignment.check(item_size));
-        std.debug.assert(item_size <= self.priv.page_size);
+        std.debug.assert(item_size <= self._page_size);
 
         const num_items = self.getNumItemsPerPage(item_size);
         var current_addr: [*]align(ItemAlignBytes) u8 = page.ptr;
@@ -213,11 +203,11 @@ pub const GlobalPager = struct {
     }
 
     pub fn getNumItemsPerPage(self: *const Self, item_size: usize) usize {
-        return self.priv.page_size / item_size;
+        return self._page_size / item_size;
     }
 
     pub fn getBaseAddr(self: *const Self) [*]u8 {
-        return self.priv.all_pages.ptr;
+        return self._all_pages.ptr;
     }
 
     const Iterator = struct {
@@ -225,7 +215,7 @@ pub const GlobalPager = struct {
         _pager: *const Self,
 
         pub fn next(self: *@This()) ?PageNum {
-            if (self._index >= self._pager.priv.pages_to_slab.len) {
+            if (self._index >= self._pager._pages_to_slab.len) {
                 return null;
             }
             const result = PageNum.init(self._index);
@@ -242,15 +232,15 @@ pub const GlobalPager = struct {
     }
 
     pub fn getPageListHead(self: *Self, num: PageNum) *ListHead {
-        return &self.priv.all_page_heads[num.page_num];
+        return &self._all_page_heads[num.page_num];
     }
 
     pub fn getPageNumOfListHead(self: *Self, entry: *ListHead) PageNum {
-        const base: [*]ListHead = self.priv.all_page_heads.ptr;
+        const base: [*]ListHead = self._all_page_heads.ptr;
         const ptr: [*]ListHead = @ptrCast(entry);
 
         const offset = ptr - base;
-        std.debug.assert(offset < self.priv.all_page_heads.len);
+        std.debug.assert(offset < self._all_page_heads.len);
 
         return PageNum.init(offset);
     }
@@ -275,23 +265,23 @@ test "basic" {
     );
     defer g.deinit();
 
-    try expectEqual(3 * 1024 * 1024, g.priv.all_pages.len);
-    try expectEqual(3, g.priv.pages_to_slab.len);
-    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[0].load());
-    try expectEqual(0xffff_ffff_ffff_ffff, g.priv.pages_to_slab[2].load());
+    try expectEqual(3 * 1024 * 1024, g._all_pages.len);
+    try expectEqual(3, g._pages_to_slab.len);
+    try expectEqual(0xffff_ffff_ffff_ffff, g._pages_to_slab[0].load());
+    try expectEqual(0xffff_ffff_ffff_ffff, g._pages_to_slab[2].load());
 
     // test allocate pages
     const p1 = g.allocPage(.{ .slab = 11 }).?;
-    try expectEqual(g.priv.all_pages.ptr, p1.ptr);
-    try expectEqual(3, g.priv.pages_to_slab.len);
+    try expectEqual(g._all_pages.ptr, p1.ptr);
+    try expectEqual(3, g._pages_to_slab.len);
 
     const p2 = g.allocPage(.{ .slab = 12 }).?;
-    try expectEqual(g.priv.all_pages.ptr + g.priv.page_size, p2.ptr);
-    try expectEqual(11, g.priv.pages_to_slab[0].load());
-    try expectEqual(12, g.priv.pages_to_slab[1].load());
+    try expectEqual(g._all_pages.ptr + g._page_size, p2.ptr);
+    try expectEqual(11, g._pages_to_slab[0].load());
+    try expectEqual(12, g._pages_to_slab[1].load());
 
     const p3 = g.allocPage(.{ .slab = 13 }).?;
-    try expectEqual(g.priv.all_pages.ptr + 2 * g.priv.page_size, p3.ptr);
+    try expectEqual(g._all_pages.ptr + 2 * g._page_size, p3.ptr);
 
     const p4 = g.allocPage(.{ .slab = 14 });
     try expectEqual(null, p4);

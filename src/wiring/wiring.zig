@@ -132,6 +132,11 @@ pub const SystemRoot = struct {
         while (true) {
             const err_item = self.touch_list.pop();
             const touch_item = err_item catch return;
+
+            // lock slab before touch
+            self.lru.lockSlab(touch_item.slab);
+            defer self.lru.unlockSlab(touch_item.slab);
+
             self.lru.asyncTouchItem(touch_item);
         }
     }
@@ -200,8 +205,8 @@ test "simple get set" {
     try expectEqual(ItemGetter.NotFound, std.meta.activeTag(getter2));
 }
 
-const num_thread = 1;
-const num_loop = 10;
+const num_thread = 10;
+const num_loop = 10_000;
 
 fn test02RunReadingThread(
     svc: *SystemRoot.ItemSvc,
@@ -297,4 +302,7 @@ test "concurrent get set" {
     for (0..num_thread) |_| {
         try group.concurrent(io, test02RunWritingThread, .{ svc, rand, all_keys });
     }
+
+    // wait for all threads
+    try group.await(io);
 }

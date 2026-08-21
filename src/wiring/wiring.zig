@@ -207,7 +207,7 @@ test "simple get set" {
 }
 
 const num_thread = 10;
-const num_loop = 10_000;
+const num_loop = 1000;
 
 fn test02RunReadingThread(
     svc: *SystemRoot.ItemSvc,

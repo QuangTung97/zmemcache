@@ -53,6 +53,7 @@ const RingEntry = struct {
 
 pub const TouchRingBuffer = struct {
     const Self = @This();
+    const AllowConsumeAhead = 128;
 
     _gpa: Allocator,
     _buffer: []RingEntry,
@@ -66,6 +67,10 @@ pub const TouchRingBuffer = struct {
 
     _padding3: CachePadding = undefined,
     _sema: zutil.Semaphore,
+
+    _padding4: CachePadding = undefined,
+    _cached_seq: u64,
+    _num_ahead: u64 = 0,
 
     pub fn init(io: std.Io, gpa: Allocator, max_size_log: u6) !Self {
         const max_size: u64 = @as(u64, 1) << max_size_log;
@@ -83,6 +88,7 @@ pub const TouchRingBuffer = struct {
             ._consume_seq = .init(0),
             ._produce_seq = .init(0),
             ._sema = .init(io),
+            ._cached_seq = 0,
         };
     }
 
@@ -92,10 +98,10 @@ pub const TouchRingBuffer = struct {
 
     pub fn push(self: *Self, item: TouchItem) void {
         const total_size: u64 = self._buffer.len;
+        const consume_seq = self._consume_seq.load();
 
         var seq = self._produce_seq.load();
         while (true) {
-            const consume_seq = self._consume_seq.load();
             if (seq >= consume_seq + total_size) {
                 return;
             }
@@ -118,8 +124,23 @@ pub const TouchRingBuffer = struct {
         }
     }
 
+    fn getConsumeSeq(self: *Self) u64 {
+        return self._cached_seq;
+    }
+
+    fn increaseConsumeSeq(self: *Self) void {
+        self._cached_seq += 1;
+        self._num_ahead += 1;
+
+        const max_num_ahead = @min(self._buffer.len, AllowConsumeAhead);
+        if (self._num_ahead >= max_num_ahead) {
+            self._num_ahead = 0;
+            self._consume_seq.store(self._cached_seq);
+        }
+    }
+
     pub fn pop(self: *Self) error{Closed}!TouchItem {
-        const seq = self._consume_seq.load();
+        const seq = self.getConsumeSeq();
         const entry = self.getEntry(seq);
 
         var next_val = entry.next.load();
@@ -128,7 +149,7 @@ pub const TouchRingBuffer = struct {
             if (next_val == RingEntry.Linked) {
                 const item = entry.touch_item;
                 entry.next.store(RingEntry.Empty);
-                self._consume_seq.store(seq + 1); // go to next
+                self.increaseConsumeSeq();
                 return item;
             }
 

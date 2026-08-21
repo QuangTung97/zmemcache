@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/wiring/root.zig"),
         .target = target,
         .imports = &.{
+            .{ .name = "zutil", .module = zutil_mod },
             .{ .name = "zcore", .module = zcore_mod },
         },
         .sanitize_thread = enable_tsan,

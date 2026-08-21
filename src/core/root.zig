@@ -1,11 +1,11 @@
-const types = @import("types.zig");
-const page = @import("page.zig");
-const slab_class = @import("slab_class.zig");
-const item_lock = @import("item_lock.zig");
-const lru_service = @import("lru_service.zig");
-const item_service = @import("item_service.zig");
-const touch_list = @import("touch_list.zig");
-const modern_lru = @import("modern_lru.zig");
+pub const types = @import("types.zig");
+pub const page = @import("page.zig");
+pub const slab_class = @import("slab_class.zig");
+pub const item_lock = @import("item_lock.zig");
+pub const lru_service = @import("lru_service.zig");
+pub const item_service = @import("item_service.zig");
+pub const touch_list = @import("touch_list.zig");
+pub const modern_lru = @import("modern_lru.zig");
 
 test {
     _ = .{

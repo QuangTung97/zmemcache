@@ -45,7 +45,12 @@ pub const SlabClassConfig = struct {
     _all_classes: ClassList,
     _after_padding: CachePadding = undefined,
 
-    pub fn init(gpa: Allocator, min_size: usize, max_size: usize, ratio: f64) !Self {
+    pub fn init(
+        gpa: Allocator,
+        min_size: usize,
+        max_size: usize,
+        growth_factor: f64,
+    ) !Self {
         zutil.runtimeAssert(Item.Alignment.check(max_size));
 
         var all_classes = ClassList.empty;
@@ -63,7 +68,7 @@ pub const SlabClassConfig = struct {
             last_size = size_aligned;
 
             try all_classes.append(gpa, size_aligned);
-            current = current * ratio;
+            current = current * growth_factor;
         }
 
         if (max_size != last_size) {

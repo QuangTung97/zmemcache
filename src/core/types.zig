@@ -247,6 +247,30 @@ pub fn NewHashFunc(T: type) HashFunc(T) {
 }
 
 // ===========================================================================
+// Real Hash Func
+// ===========================================================================
+
+pub const RealHashFunc = struct {
+    const Self = @This();
+    _seed: u64,
+
+    pub fn init(io: std.Io) Self {
+        var source = std.Random.IoSource{.io = io};
+        const rand = source.interface();
+        const seed = rand.int(u64);
+
+        return .{
+            ._seed = seed,
+        };
+    }
+
+    pub fn hashKey(self: *Self, key: []const u8) HashValue {
+        const hash = std.hash.Wyhash.hash(self._seed, key);
+        return HashValue.init(hash);
+    }
+};
+
+// ===========================================================================
 // Fake Hash Func
 // ===========================================================================
 
@@ -405,4 +429,13 @@ test "fake hash func" {
     fake.putKeyHash(key01, hash1);
 
     try expectEqual(hash1, s.hashKey(&fake, key01));
+}
+
+test "real hash func" {
+    var h = RealHashFunc.init(std.testing.io);
+
+    const impl = NewHashFunc(RealHashFunc);
+    _ = impl;
+
+    _ = h.hashKey("hello01");
 }

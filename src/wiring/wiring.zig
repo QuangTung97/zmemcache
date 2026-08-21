@@ -1,5 +1,6 @@
 const std = @import("std");
 const zcore = @import("zcore");
+const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
 
@@ -223,6 +224,19 @@ fn test02RunReadingThread(
         const getter = svc.get(key);
         switch (getter) {
             .Found => |found| {
+                zutil.runtimeAssert(std.mem.eql(u8, key, found.item.getKey()));
+                const item_value = found.item.getValue();
+                const value_len = item_value.len - 4;
+
+                // compute crc of key + value
+                var crc_sum = std.hash.crc.Crc32.init();
+                crc_sum.update(key);
+                crc_sum.update(item_value[0..value_len]);
+                const crc_value = crc_sum.final();
+
+                // check crc match
+                zutil.runtimeAssert(std.mem.eql(u8, item_value[value_len..], std.mem.asBytes(&crc_value)));
+
                 svc.finishGet(found);
             },
             .NotFound => continue,
@@ -274,7 +288,6 @@ test "concurrent get set" {
         .num_pages = 10, // 10MB
     });
     defer root.deinit();
-
 
     var group = std.Io.Group.init;
     defer group.cancel(io);

@@ -14,9 +14,13 @@ stat:
 clean:
 	rm -rf .zig-cache
 
+.PHONY: build
+build:
+	zig build -Doptimize=Debug
+
 .PHONY: perf
 perf:
-	perf record --call-graph dwarf ./zig-out/bin/zmemcach
+	perf record --call-graph fp ./zig-out/bin/zmemcache
 
 .PHONY: enable-perf
 enable-perf:

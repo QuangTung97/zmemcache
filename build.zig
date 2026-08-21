@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "wiring", .module = wiring_mod },
             },
             .sanitize_thread = enable_tsan,
-            .omit_frame_pointer = false,
+            .omit_frame_pointer = if (optimize == .Debug) false else null,
         }),
         .use_llvm = enable_tsan,
     });

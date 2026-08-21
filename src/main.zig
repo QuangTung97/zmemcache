@@ -26,18 +26,6 @@ fn runReadingThread(
         switch (getter) {
             .Found => |found| {
                 zutil.runtimeAssert(std.mem.eql(u8, key, found.item.getKey()));
-                const item_value = found.item.getValue();
-                const value_len = item_value.len - 4;
-
-                // compute crc of key + value
-                var crc_sum = std.hash.crc.Crc32.init();
-                crc_sum.update(key);
-                crc_sum.update(item_value[0..value_len]);
-                const crc_value = crc_sum.final();
-
-                // check crc match
-                zutil.runtimeAssert(std.mem.eql(u8, item_value[value_len..], std.mem.asBytes(&crc_value)));
-
                 svc.finishGet(found);
             },
             .NotFound => continue,
@@ -64,18 +52,11 @@ fn runWritingThread(
         const value_bytes = write_buffer[0..value_len];
         rand.bytes(value_bytes); // generate random value
 
-        // compute crc of key + value
-        var crc_sum = std.hash.crc.Crc32.init();
-        crc_sum.update(key);
-        crc_sum.update(value_bytes);
-        const crc_value = crc_sum.final();
-
-        const null_setter = svc.put(key, value_len + 4);
+        const null_setter = svc.put(key, value_len);
         const setter = null_setter orelse continue;
 
         const item_value = setter.item.getValue();
-        @memcpy(item_value[0..value_len], value_bytes);
-        @memcpy(item_value[value_len..], std.mem.asBytes(&crc_value));
+        @memcpy(item_value, value_bytes);
 
         svc.finishPut(setter);
     }

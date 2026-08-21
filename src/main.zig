@@ -5,8 +5,8 @@ const wiring = @import("wiring");
 const num_keys = 1 << 14;
 const max_key_len = 50;
 
-const num_read_thread = 12;
-const num_read_loop = 50_000_000;
+const num_read_thread = 6;
+const num_read_loop = 100_000_000;
 
 const write_first = true;
 const num_write_thread = 1;
@@ -122,4 +122,5 @@ pub fn main() !void {
     std.debug.print("Total time: {}ms\n", .{duration.toMilliseconds()});
     std.debug.print( "Not Found: {}\n", .{not_found_total.load(.seq_cst)});
     std.debug.print( "Set Partial: {}\n", .{set_partial_total.load(.seq_cst)});
+    std.debug.print( "Ring Buffer Exceeded Total: {}\n", .{root.touch_list.exceeded_count.load()});
 }

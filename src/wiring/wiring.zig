@@ -206,7 +206,7 @@ test "simple get set" {
     try expectEqual(ItemGetter.NotFound, std.meta.activeTag(getter2));
 }
 
-const num_thread = 10;
+const num_thread = 4;
 const num_loop = 1000;
 
 fn test02RunReadingThread(

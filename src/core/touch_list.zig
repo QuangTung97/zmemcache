@@ -72,6 +72,9 @@ pub const TouchRingBuffer = struct {
     _cached_seq: u64,
     _num_ahead: u64 = 0,
 
+    _padding5: CachePadding = undefined,
+    exceeded_count: zatomic.Value(u64),
+
     pub fn init(io: std.Io, gpa: Allocator, max_size_log: u6) !Self {
         const max_size: u64 = @as(u64, 1) << max_size_log;
 
@@ -89,6 +92,7 @@ pub const TouchRingBuffer = struct {
             ._produce_seq = .init(0),
             ._sema = .init(io),
             ._cached_seq = 0,
+            .exceeded_count = .init(0),
         };
     }
 
@@ -103,6 +107,7 @@ pub const TouchRingBuffer = struct {
         var seq = self._produce_seq.load();
         while (true) {
             if (seq >= consume_seq + total_size) {
+                _ = self.exceeded_count.fetchAdd(1);
                 return;
             }
 
@@ -258,8 +263,11 @@ test "ring buffer, full and close" {
 
     b.push(TouchItem.fromItem(&item1));
     b.push(TouchItem.fromItem(&item2));
+    try expectEqual(0, b.exceeded_count.load());
+
     b.push(TouchItem.fromItem(&item3));
     b.close();
+    try expectEqual(1, b.exceeded_count.load());
 
     const touch1 = try b.pop();
     try expectEqual(31, touch1.cas.cas);

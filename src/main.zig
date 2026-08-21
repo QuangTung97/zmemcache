@@ -3,9 +3,10 @@ const zutil = @import("zutil");
 const wiring = @import("wiring");
 
 const num_keys = 1 << 10;
+const max_key_len = 50;
 
 const num_read_thread = 4;
-const num_read_loop = 1000_000;
+const num_read_loop = 10_000_000;
 
 const num_write_thread = 2;
 const num_write_loop = 100_000;
@@ -34,6 +35,8 @@ fn runReadingThread(
     }
 }
 
+var write_buffer: [16 * 1024]u8 = @splat(33);
+
 fn runWritingThread(
     svc: *wiring.SystemRoot.ItemSvc,
     root_rand: std.Random,
@@ -42,15 +45,12 @@ fn runWritingThread(
     var prng = std.Random.DefaultPrng.init(root_rand.int(u64));
     const rand = prng.random();
 
-    var write_buffer: [16 * 1024]u8 = undefined;
-
     for (0..num_write_loop) |_| {
         const index = rand.uintLessThan(usize, all_keys.len);
         const key = all_keys[index];
 
         const value_len = rand.uintLessThan(usize, write_buffer.len);
         const value_bytes = write_buffer[0..value_len];
-        rand.bytes(value_bytes); // generate random value
 
         const null_setter = svc.put(key, value_len);
         const setter = null_setter orelse continue;
@@ -82,7 +82,7 @@ pub fn main() !void {
     const all_keys = try gpa.alloc([]u8, num_keys);
     defer gpa.free(all_keys);
     for (all_keys) |*key| {
-        const key_len = rand.intRangeAtMost(u8, 1, 255);
+        const key_len = rand.intRangeAtMost(u8, 1, max_key_len);
         key.* = try gpa.alloc(u8, key_len);
         rand.bytes(key.*);
     }

@@ -15,6 +15,12 @@ pub fn build(b: *std.Build) void {
         .sanitize_thread = enable_tsan,
     });
 
+    const zepoll_mod = b.addModule("zepoll", .{
+        .root_source_file = b.path("src/epoll/root.zig"),
+        .target = target,
+        .sanitize_thread = enable_tsan,
+    });
+
     const zcore_mod = b.addModule("zcore", .{
         .root_source_file = b.path("src/core/root.zig"),
         .target = target,
@@ -62,8 +68,9 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_step = b.step("test", "Run tests");
-    addTestModule(b, test_step, zcore_mod, enable_tsan);
     addTestModule(b, test_step, zutil_mod, enable_tsan);
+    addTestModule(b, test_step, zepoll_mod, enable_tsan);
+    addTestModule(b, test_step, zcore_mod, enable_tsan);
     addTestModule(b, test_step, wiring_mod, enable_tsan);
 }
 

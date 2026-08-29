@@ -1,0 +1,1 @@
+- Add errdefer for any allocation error

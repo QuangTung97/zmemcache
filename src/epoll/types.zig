@@ -33,6 +33,15 @@ pub fn EventFdFuncs(FD: type) type {
     };
 }
 
+pub fn ActionEntry(FD: type) type {
+    return union(enum) {
+        NewConn: struct {
+            fd: FD,
+        },
+        Shutdown: struct {},
+    };
+}
+
 test "hello" {
     try std.testing.expectEqual(2, 2);
 }

@@ -3,6 +3,13 @@ const types = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
 
+const TaskType = enum { Read, Write };
+
+const HandleTaskStatus = enum {
+    Continue, // loop right away
+    Next, // go to the next task
+};
+
 pub fn EpollCore(
     FD: type,
     Event: type,
@@ -12,6 +19,8 @@ pub fn EpollCore(
     _: types.EventFuncs(Event),
     _: types.EpollFuncs(E, Event, FD),
 ) type {
+    const ActionQueue = std.Deque(types.ActionEntry(FD));
+
     const buffer_size = 4 * 1024;
 
     const SocketState = struct {
@@ -28,9 +37,9 @@ pub fn EpollCore(
         read_size: ?usize = null,
         handle_buf: [buffer_size]u8 = undefined,
         handle_buf_len: usize = 0,
-    };
 
-    const TaskType = enum { Read, Write };
+        // TODO add linked list of all socket states
+    };
 
     const Task = struct {
         task_type: TaskType,
@@ -39,17 +48,16 @@ pub fn EpollCore(
 
     const TaskQueue = std.Deque(Task);
 
-    const HandleTaskStatus = enum {
-        Continue, // loop right away
-        Next, // go to the next task
-    };
-
     return struct {
         const Self = @This();
 
         _gpa: Allocator,
+        _action_queue: ActionQueue,
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
+
+        // TODO add padding
+        _num_active_conns: u64, // TODO use atomic
 
         pub fn init(gpa: Allocator) !*Self {
             const self = try gpa.create(Self);

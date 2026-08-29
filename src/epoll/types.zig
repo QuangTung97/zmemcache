@@ -42,6 +42,22 @@ pub fn ActionEntry(FD: type) type {
     };
 }
 
+pub fn WriterFuncs(T: type) type {
+    return struct {
+        addWriteFrame: fn (self: *T, data: []const u8) void,
+    };
+}
+
+pub fn CallbackFuncs(
+    T: type,
+    WriterState: type,
+) type {
+    return struct {
+        onReadData: fn (self: *T, data: []const u8, writer: *WriterState) void,
+        popWriteFrame: fn (self: *T) void,
+    };
+}
+
 test "hello" {
     try std.testing.expectEqual(2, 2);
 }

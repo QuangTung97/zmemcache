@@ -13,11 +13,6 @@ const HandleTaskStatus = enum {
 pub fn EpollCore(
     FD: type,
     Event: type,
-    E: type,
-    _: types.EventFdFuncs(FD),
-    _: types.SocketFuncs(FD),
-    _: types.EventFuncs(Event),
-    _: types.EpollFuncs(E, Event, FD),
 ) type {
     const ActionQueue = std.Deque(types.ActionEntry(FD));
 
@@ -57,7 +52,7 @@ pub fn EpollCore(
         _yield_queue: TaskQueue,
 
         // TODO add padding
-        _num_active_conns: u64, // TODO use atomic
+        _num_active_conns: u64 = 0, // TODO use atomic
 
         pub fn init(gpa: Allocator) !*Self {
             const self = try gpa.create(Self);
@@ -65,6 +60,9 @@ pub fn EpollCore(
 
             self.* = .{
                 ._gpa = gpa,
+                ._action_queue = .empty,
+                ._task_queue = .empty,
+                ._yield_queue = .empty,
             };
 
             return self;
@@ -83,4 +81,56 @@ pub fn EpollCore(
 
         fn handleTask(_: *Self, _: Task) HandleTaskStatus {}
     };
+}
+
+// ===========================================================================
+// Fake Objects
+// ===========================================================================
+
+const FakeEvent = struct {};
+
+// ===========================================================================
+// Testing
+// ===========================================================================
+
+const CoreTest = struct {
+    const Self = @This();
+    const CoreType = EpollCore(u64, FakeEvent);
+
+    core: *CoreType,
+
+    fn init() !*Self {
+        const gpa = std.testing.allocator;
+
+        const core = try CoreType.init(gpa);
+        errdefer core.deinit();
+
+        const self = try gpa.create(Self);
+        errdefer gpa.destroy(self);
+
+        self.* = .{
+            .core = core,
+        };
+
+        return self;
+    }
+
+    fn deinit(self: *Self) void {
+        const gpa = std.testing.allocator;
+
+        self.core.deinit();
+        gpa.destroy(self);
+    }
+
+    fn handleEpollEvent(self: *Self, event: FakeEvent) void {
+        self.core.handleEpollEvent(event);
+    }
+};
+
+test "handle epoll event" {
+    const s = try CoreTest.init();
+    defer s.deinit();
+
+    const event = FakeEvent{};
+    s.handleEpollEvent(event);
 }

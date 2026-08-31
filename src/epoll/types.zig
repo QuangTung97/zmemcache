@@ -63,8 +63,8 @@ pub const WriteQueue = struct {
         self._queue.pushBackBounded(data) catch unreachable;
     }
 
-    pub fn popWriteFrame(self: *Self) void {
-        _ = self._queue.popFront();
+    pub fn popWriteFrame(self: *Self) ?[]const u8 {
+        return self._queue.popFront();
     }
 
     pub fn iterator(self: *Self) Queue.Iterator {
@@ -103,10 +103,13 @@ test "writer queue" {
     try std.testing.expectEqual(false, w.allowNumItems(3));
 
     var it = w.iterator();
-    var total : u64 = 0;
+    var total: u64 = 0;
     while (it.next()) |e| {
         try std.testing.expectEqual(7, e.len);
         total += 1;
     }
     try std.testing.expectEqual(2, total);
+
+    try std.testing.expectEqualStrings("data 01", w.popWriteFrame().?);
+    try std.testing.expectEqualStrings("data 02", w.popWriteFrame().?);
 }

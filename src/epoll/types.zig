@@ -12,9 +12,19 @@ pub fn EpollFuncs(T: type, Event: type, FD: type) type {
 
 pub fn EventFuncs(Event: type) type {
     return struct {
-        hasEpollIn: fn (self: *const Event) bool,
-        hasEpollOut: fn (self: *const Event) bool,
-        getDataPtr: fn (self: *const Event) *anyopaque,
+        hasEpollIn: fn (self: Event) bool,
+        hasEpollOut: fn (self: Event) bool,
+        getDataPtr: fn (self: Event) *anyopaque,
+
+        const Self = @This();
+
+        pub fn init() Self {
+            return .{
+                .hasEpollIn = Event.hasEpollIn,
+                .hasEpollOut = Event.hasEpollOut,
+                .getDataPtr = Event.getDataPtr,
+            };
+        }
     };
 }
 

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const Allocator = std.mem.Allocator;
+
 pub fn EpollFuncs(T: type, Event: type, FD: type) type {
     return struct {
         epollWait: fn (self: T, events: []Event, with_wait: bool) []Event,
@@ -42,22 +44,58 @@ pub fn ActionEntry(FD: type) type {
     };
 }
 
-pub fn WriterFuncs(T: type) type {
-    return struct {
-        addWriteFrame: fn (self: *T, data: []const u8) void,
-    };
-}
+pub const WriteQueue = struct {
+    const Self = @This();
+    const Queue = std.Deque([]const u8);
 
-pub fn CallbackFuncs(
-    T: type,
-    WriterState: type,
-) type {
+    _gpa: Allocator,
+    _queue: Queue,
+
+    pub fn init(gpa: Allocator, queue_size: usize) !Self {
+        const queue = try Queue.initCapacity(gpa, queue_size);
+        return .{
+            ._gpa = gpa,
+            ._queue = queue,
+        };
+    }
+
+    pub fn addWriteFrame(self: *Self, data: []const u8) void {
+        self._queue.pushBackBounded(data) catch unreachable;
+    }
+
+    pub fn popWriteFrame(self: *Self) void {
+        _ = self._queue.popFront();
+    }
+
+    pub fn iterator(self: *Self) Queue.Iterator {
+        return self._queue.iterator();
+    }
+
+    pub fn deinit(self: *Self) void {
+        self._queue.deinit(self._gpa);
+    }
+};
+
+pub fn CallbackFuncs(T: type) type {
     return struct {
-        onReadData: fn (self: *T, data: []const u8, writer: *WriterState) void,
+        onReadData: fn (self: *T, data: []const u8, writeQueue: *WriteQueue) void,
         popWriteFrame: fn (self: *T) void,
     };
 }
 
-test "hello" {
-    try std.testing.expectEqual(2, 2);
+test "writer queue" {
+    const gpa = std.testing.allocator;
+    var w = try WriteQueue.init(gpa, 3);
+    defer w.deinit();
+
+    w.addWriteFrame("data 01");
+    w.addWriteFrame("data 02");
+
+    var it = w.iterator();
+    var total : u64 = 0;
+    while (it.next()) |e| {
+        try std.testing.expectEqual(7, e.len);
+        total += 1;
+    }
+    try std.testing.expectEqual(2, total);
 }

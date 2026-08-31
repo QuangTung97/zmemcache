@@ -74,6 +74,10 @@ pub const WriteQueue = struct {
     pub fn deinit(self: *Self) void {
         self._queue.deinit(self._gpa);
     }
+
+    pub fn allowNumItems(self: *const Self, num_items: usize) bool {
+        return self._queue.len + num_items <= self._queue.buffer.len;
+    }
 };
 
 pub fn CallbackFuncs(T: type) type {
@@ -88,8 +92,15 @@ test "writer queue" {
     var w = try WriteQueue.init(gpa, 3);
     defer w.deinit();
 
+    try std.testing.expectEqual(true, w.allowNumItems(3));
+    try std.testing.expectEqual(false, w.allowNumItems(4));
+
     w.addWriteFrame("data 01");
     w.addWriteFrame("data 02");
+
+    try std.testing.expectEqual(true, w.allowNumItems(1));
+    try std.testing.expectEqual(false, w.allowNumItems(2));
+    try std.testing.expectEqual(false, w.allowNumItems(3));
 
     var it = w.iterator();
     var total : u64 = 0;

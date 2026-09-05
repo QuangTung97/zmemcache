@@ -13,7 +13,9 @@ const HandleTaskStatus = enum {
 pub fn EpollCore(
     FD: type,
     Event: type,
+    EpollType: type,
     EventFuncs: types.EventFuncs(Event),
+    EpollFuncs: types.EpollFuncs(EpollType, Event, FD),
 ) type {
     const ActionType = types.ActionEntry(FD);
     const ActionQueue = std.Deque(ActionType);
@@ -50,6 +52,7 @@ pub fn EpollCore(
         const StateAlloc = types.StackAllocator(SocketState);
         const Self = @This();
 
+        _epoll: *EpollType,
         _action_queue: ActionQueue,
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
@@ -61,6 +64,7 @@ pub fn EpollCore(
 
         pub fn init(
             gpa: Allocator,
+            epoll: *EpollType,
             eventfd_num: FD,
             max_num_sockets: usize,
         ) !*Self {
@@ -68,6 +72,7 @@ pub fn EpollCore(
             errdefer gpa.destroy(self);
 
             self.* = .{
+                ._epoll = epoll,
                 ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
                 ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
                 ._yield_queue = try .initCapacity(gpa, max_num_sockets),
@@ -146,7 +151,7 @@ pub fn EpollCore(
         }
 
         fn handleTaskEventFD(self: *Self) HandleTaskStatus {
-            const state = self._eventfd_state;
+            // TODO check num_handled_actions
 
             const null_action = self._action_queue.popFront();
             const action = if (null_action) |x| x else {
@@ -156,13 +161,7 @@ pub fn EpollCore(
 
             switch (action) {
                 .NewConn => |new_conn| {
-                    const conn_state = self._state_alloc.create();
-                    conn_state.* = .{
-                        .socket_fd = new_conn.fd,
-                    };
-                    self.addReadTask(conn_state);
-
-                    state.num_handled_actions += 1;
+                    self.handleNewConn(new_conn.fd);
                     return .Continue;
                 },
                 .Shutdown => {
@@ -170,11 +169,25 @@ pub fn EpollCore(
                 },
             }
         }
+
+        fn handleNewConn(self: *Self, new_conn_fd: FD) void {
+            const conn_state = self._state_alloc.create();
+            conn_state.* = .{
+                .socket_fd = new_conn_fd,
+            };
+
+            // add to epoll
+            EpollFuncs.epollAdd(self._epoll, new_conn_fd, conn_state);
+            self.addReadTask(conn_state);
+
+            const state = self._eventfd_state;
+            state.num_handled_actions += 1;
+        }
     };
 }
 
 // ===========================================================================
-// Fake Objects
+// Fake Event
 // ===========================================================================
 
 const FakeEvent = struct {
@@ -198,6 +211,37 @@ const FakeEvent = struct {
 };
 
 // ===========================================================================
+// Fake Epoll
+// ===========================================================================
+
+const FakeEpoll = struct {
+    const Self = @This();
+    const SocketMap = std.AutoHashMap(u64, *anyopaque);
+
+    socket_map: SocketMap,
+
+    fn init(gpa: Allocator) Self {
+        return .{
+            .socket_map = SocketMap.init(gpa),
+        };
+    }
+
+    fn deinit(self: *Self) void {
+        self.socket_map.deinit();
+    }
+
+    pub fn epollWait(_: *Self, buffer: []FakeEvent, _: bool) []FakeEvent {
+        return buffer[0..0];
+    }
+
+    pub fn epollAdd(self: *Self, fd: u64, data_ptr: *anyopaque) void {
+        self.socket_map.put(fd, data_ptr) catch unreachable;
+    }
+
+    pub fn epollRemove(_: *Self, _: u64) void {}
+};
+
+// ===========================================================================
 // Testing
 // ===========================================================================
 
@@ -205,8 +249,17 @@ const CoreTest = struct {
     const Self = @This();
 
     const EventFuncs = types.EventFuncs(FakeEvent);
-    const CoreType = EpollCore(u64, FakeEvent, EventFuncs.init());
+    const EpollFuncs = types.EpollFuncs(FakeEpoll, FakeEvent, u64);
 
+    const CoreType = EpollCore(
+        u64,
+        FakeEvent,
+        FakeEpoll,
+        EventFuncs.init(),
+        EpollFuncs.init(),
+    );
+
+    epoll: FakeEpoll,
     core: *CoreType,
 
     fn init() !*Self {
@@ -215,19 +268,28 @@ const CoreTest = struct {
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
 
-        const core = try CoreType.init(gpa, 11, 3);
-        errdefer core.deinit();
-
         self.* = .{
-            .core = core,
+            .epoll = FakeEpoll.init(gpa),
+            .core = undefined,
         };
+
+        self.core = try CoreType.init(
+            gpa,
+            &self.epoll,
+            11,
+            3,
+        );
+        errdefer self.core.deinit();
 
         return self;
     }
 
     fn deinit(self: *Self) void {
         const gpa = std.testing.allocator;
+
         self.core.deinit(gpa);
+        self.epoll.deinit();
+
         gpa.destroy(self);
     }
 
@@ -278,4 +340,8 @@ test "handle epoll event" {
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task1));
     try expectEqual(1, s.core._task_queue.len);
     try expectEqual(0, s.core._action_queue.len);
+    try expectEqual(1, s.core._eventfd_state.num_handled_actions);
+    // check socket map
+    try expectEqual(1, s.epoll.socket_map.count());
+    try expectEqual(true, s.epoll.socket_map.contains(21));
 }

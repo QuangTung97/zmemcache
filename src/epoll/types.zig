@@ -4,9 +4,19 @@ const Allocator = std.mem.Allocator;
 
 pub fn EpollFuncs(T: type, Event: type, FD: type) type {
     return struct {
-        epollWait: fn (self: T, events: []Event, with_wait: bool) []Event,
-        epollAdd: fn (self: T, client_fd: FD, data_ptr: *anyopaque) void,
-        epollRemove: fn (self: T, client_fd: FD) void,
+        epollWait: fn (self: *T, events: []Event, with_wait: bool) []Event,
+        epollAdd: fn (self: *T, client_fd: FD, data_ptr: *anyopaque) void,
+        epollRemove: fn (self: *T, client_fd: FD) void,
+
+        const Self = @This();
+
+        pub fn init() Self {
+            return .{
+                .epollWait = T.epollWait,
+                .epollAdd = T.epollAdd,
+                .epollRemove = T.epollRemove,
+            };
+        }
     };
 }
 

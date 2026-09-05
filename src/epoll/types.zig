@@ -97,6 +97,47 @@ pub fn CallbackFuncs(T: type) type {
     };
 }
 
+pub fn StackAllocator(T: type) type {
+    return struct {
+        const Self = @This();
+        const IndexList = std.ArrayList(usize);
+
+        _all_items: []T,
+        _free_indices: IndexList,
+
+        pub fn init(gpa: Allocator, max_size: usize) !Self {
+            const all_items = try gpa.alloc(T, max_size);
+            errdefer gpa.free(all_items);
+
+            var free_indices = try IndexList.initCapacity(gpa, max_size);
+            for (0..max_size) |i| {
+                try free_indices.appendBounded(i);
+            }
+
+            return .{
+                ._all_items = all_items,
+                ._free_indices = free_indices,
+            };
+        }
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self._free_indices.deinit(gpa);
+            gpa.free(self._all_items);
+        }
+
+        pub fn create(self: *Self) *T {
+            const free_index = self._free_indices.pop().?;
+            return &self._all_items[free_index];
+        }
+
+        pub fn destroy(self: *Self, item: *T) void {
+            const item_ptr: [*]T = @ptrCast(item);
+            const index = item_ptr - self._all_items.ptr;
+            self._free_indices.appendBounded(index) catch unreachable;
+        }
+    };
+}
+
 test "writer queue" {
     const gpa = std.testing.allocator;
     var w = try WriteQueue.init(gpa, 3);
@@ -122,4 +163,26 @@ test "writer queue" {
 
     try std.testing.expectEqualStrings("data 01", w.popWriteFrame().?);
     try std.testing.expectEqualStrings("data 02", w.popWriteFrame().?);
+}
+
+test "stack allocator" {
+    const gpa = std.testing.allocator;
+
+    var s = try StackAllocator(u64).init(gpa, 3);
+    defer s.deinit(gpa);
+
+    // check after init
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, s._free_indices.items);
+
+    // create
+    const ptr1 = s.create();
+    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, s._free_indices.items);
+
+    // create again
+    const ptr2 = s.create();
+    try std.testing.expectEqualSlices(usize, &.{0}, s._free_indices.items);
+
+    s.destroy(ptr1);
+    s.destroy(ptr2);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 1 }, s._free_indices.items);
 }

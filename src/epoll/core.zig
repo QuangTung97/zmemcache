@@ -15,7 +15,8 @@ pub fn EpollCore(
     Event: type,
     EventFuncs: types.EventFuncs(Event),
 ) type {
-    const ActionQueue = std.Deque(types.ActionEntry(FD));
+    const ActionType = types.ActionEntry(FD);
+    const ActionQueue = std.Deque(ActionType);
 
     const buffer_size = 4 * 1024;
 
@@ -24,6 +25,7 @@ pub fn EpollCore(
 
         is_reading: bool = false,
         is_writing: bool = false,
+        num_handled_actions: usize = 0,
 
         client_closed: bool = false,
         server_closed: bool = false,
@@ -39,21 +41,20 @@ pub fn EpollCore(
         // TODO add linked list of all socket states
     };
 
-    const Task = struct {
-        task_type: TaskType,
-        state: *SocketState,
-    };
-
-    const TaskQueue = std.Deque(Task);
-
     return struct {
+        const Task = struct {
+            task_type: TaskType,
+            state: *SocketState,
+        };
+        const TaskQueue = std.Deque(Task);
+        const StateAlloc = types.StackAllocator(SocketState);
         const Self = @This();
 
-        _gpa: Allocator,
-        _eventfd_state: *SocketState,
         _action_queue: ActionQueue,
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
+        _state_alloc: StateAlloc,
+        _eventfd_state: *SocketState,
 
         // TODO add padding
         _num_active_conns: u64 = 0, // TODO use atomic
@@ -66,32 +67,28 @@ pub fn EpollCore(
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
 
-            const eventfd_state = try gpa.create(SocketState);
-            errdefer gpa.destroy(eventfd_state);
-
-            eventfd_state.* = .{
-                .socket_fd = eventfd_num,
-            };
-
             self.* = .{
-                ._gpa = gpa,
-                ._eventfd_state = eventfd_state,
                 ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
                 ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
                 ._yield_queue = try .initCapacity(gpa, max_num_sockets),
+                ._state_alloc = try StateAlloc.init(gpa, max_num_sockets + 1),
+                ._eventfd_state = undefined,
+            };
+
+            self._eventfd_state = self._state_alloc.create();
+            self._eventfd_state.* = .{
+                .socket_fd = eventfd_num,
             };
 
             return self;
         }
 
-        pub fn deinit(self: *Self) void {
-            const gpa = self._gpa;
-
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self._state_alloc.deinit(gpa);
             self._yield_queue.deinit(gpa);
             self._task_queue.deinit(gpa);
             self._action_queue.deinit(gpa);
 
-            gpa.destroy(self._eventfd_state);
             gpa.destroy(self);
         }
 
@@ -110,6 +107,14 @@ pub fn EpollCore(
             if (EventFuncs.hasEpollOut(event)) {
                 self.addWriteTask(state);
             }
+        }
+
+        fn addActionQueue(self: *Self, action: ActionType) void {
+            self._action_queue.pushBackBounded(action) catch unreachable;
+        }
+
+        fn popTaskQueue(self: *Self) ?Task {
+            return self._task_queue.popFront();
         }
 
         fn addReadTask(self: *Self, state: *SocketState) void {
@@ -133,7 +138,38 @@ pub fn EpollCore(
             self._task_queue.pushBackBounded(task) catch unreachable;
         }
 
-        fn handleTask(_: *Self, _: Task) HandleTaskStatus {}
+        fn handleTask(self: *Self, task: Task) HandleTaskStatus {
+            if (task.state == self._eventfd_state) {
+                return self.handleTaskEventFD();
+            }
+            return .Next;
+        }
+
+        fn handleTaskEventFD(self: *Self) HandleTaskStatus {
+            const state = self._eventfd_state;
+
+            const null_action = self._action_queue.popFront();
+            const action = if (null_action) |x| x else {
+                // TODO clear num handled actions
+                return .Next;
+            };
+
+            switch (action) {
+                .NewConn => |new_conn| {
+                    const conn_state = self._state_alloc.create();
+                    conn_state.* = .{
+                        .socket_fd = new_conn.fd,
+                    };
+                    self.addReadTask(conn_state);
+
+                    state.num_handled_actions += 1;
+                    return .Continue;
+                },
+                .Shutdown => {
+                    @panic("TODO");
+                },
+            }
+        }
     };
 }
 
@@ -191,13 +227,24 @@ const CoreTest = struct {
 
     fn deinit(self: *Self) void {
         const gpa = std.testing.allocator;
-
-        self.core.deinit();
+        self.core.deinit(gpa);
         gpa.destroy(self);
     }
 
     fn handleEpollEvent(self: *Self, event: FakeEvent) void {
         self.core.handleEpollEvent(event);
+    }
+
+    fn addActionNewConn(self: *Self, fd: u64) void {
+        self.core.addActionQueue(.{ .NewConn = .{ .fd = fd } });
+    }
+
+    fn popTaskQueue(self: *Self) ?CoreType.Task {
+        return self.core.popTaskQueue();
+    }
+
+    fn handleTask(self: *Self, task: CoreType.Task) HandleTaskStatus {
+        return self.core.handleTask(task);
     }
 
     fn newEpollEventFD(self: *Self) FakeEvent {
@@ -221,4 +268,14 @@ test "handle epoll event" {
     // add event fd epoll event again
     s.handleEpollEvent(s.newEpollEventFD());
     try expectEqual(1, s.core._task_queue.len);
+
+    // new socket
+    s.addActionNewConn(21);
+    try expectEqual(1, s.core._action_queue.len);
+
+    // pop and handle task
+    const task1 = s.popTaskQueue().?;
+    try expectEqual(HandleTaskStatus.Continue, s.handleTask(task1));
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(0, s.core._action_queue.len);
 }

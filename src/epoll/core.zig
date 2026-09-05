@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 
 const TaskType = enum { Read, Write };
 
+const initial_read_size = 1;
+
 const HandleTaskStatus = enum {
     Continue, // loop right away
     Next, // go to the next task
@@ -14,8 +16,10 @@ pub fn EpollCore(
     FD: type,
     Event: type,
     EpollType: type,
+    SocketSvc: type,
     EventFuncs: types.EventFuncs(Event),
     EpollFuncs: types.EpollFuncs(EpollType, Event, FD),
+    SocketFuncs: types.SocketFuncs(SocketSvc, FD),
 ) type {
     const ActionType = types.ActionEntry(FD);
     const ActionQueue = std.Deque(ActionType);
@@ -53,6 +57,7 @@ pub fn EpollCore(
         const Self = @This();
 
         _epoll: *EpollType,
+        _socket_svc: *SocketSvc,
         _action_queue: ActionQueue,
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
@@ -65,6 +70,7 @@ pub fn EpollCore(
         pub fn init(
             gpa: Allocator,
             epoll: *EpollType,
+            socket_svc: *SocketSvc,
             eventfd_num: FD,
             max_num_sockets: usize,
         ) !*Self {
@@ -73,6 +79,7 @@ pub fn EpollCore(
 
             self.* = .{
                 ._epoll = epoll,
+                ._socket_svc = socket_svc,
                 ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
                 ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
                 ._yield_queue = try .initCapacity(gpa, max_num_sockets),
@@ -119,7 +126,13 @@ pub fn EpollCore(
         }
 
         fn popTaskQueue(self: *Self) ?Task {
-            return self._task_queue.popFront();
+            const null_task = self._task_queue.popFront();
+            const task = if (null_task) |x| x else {
+                return null;
+            };
+            // TODO clear conditional
+            task.state.is_reading = false;
+            return task;
         }
 
         fn addReadTask(self: *Self, state: *SocketState) void {
@@ -147,7 +160,10 @@ pub fn EpollCore(
             if (task.state == self._eventfd_state) {
                 return self.handleTaskEventFD();
             }
-            return .Next;
+            return switch (task.task_type) {
+                .Read => self.handleReadSocket(task.state),
+                .Write => self.handleWriteSocket(task.state),
+            };
         }
 
         fn handleTaskEventFD(self: *Self) HandleTaskStatus {
@@ -174,6 +190,7 @@ pub fn EpollCore(
             const conn_state = self._state_alloc.create();
             conn_state.* = .{
                 .socket_fd = new_conn_fd,
+                .read_size = initial_read_size,
             };
 
             // add to epoll
@@ -182,6 +199,23 @@ pub fn EpollCore(
 
             const state = self._eventfd_state;
             state.num_handled_actions += 1;
+        }
+
+        fn handleReadSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            const read_resp = SocketFuncs.read(
+                self._socket_svc,
+                state.socket_fd,
+                &state.tmp_buf,
+            );
+            if (read_resp) |_| {
+                @panic("TODO");
+            } else |_| {
+                @panic("TODO");
+            }
+        }
+
+        fn handleWriteSocket(_: *Self, _: *SocketState) HandleTaskStatus {
+            @panic("TODO");
         }
     };
 }
@@ -242,6 +276,22 @@ const FakeEpoll = struct {
 };
 
 // ===========================================================================
+// Fake Socket Svc
+// ===========================================================================
+
+const FakeSocketSvc = struct {
+    const Self = @This();
+
+    pub fn init() Self {
+        return .{};
+    }
+
+    pub fn read(_: *Self, _: u64, _: []u8) types.SocketError!usize {
+        return 0;
+    }
+};
+
+// ===========================================================================
 // Testing
 // ===========================================================================
 
@@ -250,16 +300,20 @@ const CoreTest = struct {
 
     const EventFuncs = types.EventFuncs(FakeEvent);
     const EpollFuncs = types.EpollFuncs(FakeEpoll, FakeEvent, u64);
+    const SocketFuncs = types.SocketFuncs(FakeSocketSvc, u64);
 
     const CoreType = EpollCore(
         u64,
         FakeEvent,
         FakeEpoll,
+        FakeSocketSvc,
         EventFuncs.init(),
         EpollFuncs.init(),
+        SocketFuncs.init(),
     );
 
     epoll: FakeEpoll,
+    socket_svc: FakeSocketSvc,
     core: *CoreType,
 
     fn init() !*Self {
@@ -270,12 +324,14 @@ const CoreTest = struct {
 
         self.* = .{
             .epoll = FakeEpoll.init(gpa),
+            .socket_svc = FakeSocketSvc.init(),
             .core = undefined,
         };
 
         self.core = try CoreType.init(
             gpa,
             &self.epoll,
+            &self.socket_svc,
             11,
             3,
         );
@@ -337,6 +393,9 @@ test "handle epoll event" {
 
     // pop and handle task
     const task1 = s.popTaskQueue().?;
+    try expectEqual(false, task1.state.is_reading);
+    try expectEqual(false, task1.state.is_writing);
+
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task1));
     try expectEqual(1, s.core._task_queue.len);
     try expectEqual(0, s.core._action_queue.len);
@@ -344,4 +403,8 @@ test "handle epoll event" {
     // check socket map
     try expectEqual(1, s.epoll.socket_map.count());
     try expectEqual(true, s.epoll.socket_map.contains(21));
+
+    // handle read from socket task
+    const task2 = s.popTaskQueue().?;
+    try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
 }

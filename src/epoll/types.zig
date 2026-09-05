@@ -38,13 +38,20 @@ pub fn EventFuncs(Event: type) type {
     };
 }
 
-pub const SocketError = error{ EAGAIN, ConnectionError };
+pub const SocketError = error{ EAGAIN, ConnectionError, SocketClosed };
 
-pub fn SocketFuncs(FD: type) type {
+pub fn SocketFuncs(T: type, FD: type) type {
     return struct {
-        read: fn (socket: FD, buffer: []u8) SocketError![]u8,
-        write: fn (socket: FD, data: []const u8) SocketError!usize,
-        close: fn (socket: FD) void,
+        // read always returns size > 0
+        read: fn (self: *T, socket: FD, buffer: []u8) SocketError!usize,
+
+        const Self = @This();
+
+        pub fn init() Self {
+            return .{
+                .read = T.read,
+            };
+        }
     };
 }
 

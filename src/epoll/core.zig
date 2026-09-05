@@ -20,8 +20,10 @@ pub fn EpollCore(
     const buffer_size = 4 * 1024;
 
     const SocketState = struct {
-        is_eventfd: bool,
         socket_fd: FD,
+
+        is_reading: bool = false,
+        is_writing: bool = false,
 
         client_closed: bool = false,
         server_closed: bool = false,
@@ -56,7 +58,11 @@ pub fn EpollCore(
         // TODO add padding
         _num_active_conns: u64 = 0, // TODO use atomic
 
-        pub fn init(gpa: Allocator, eventfd_num: FD) !*Self {
+        pub fn init(
+            gpa: Allocator,
+            eventfd_num: FD,
+            max_num_sockets: usize,
+        ) !*Self {
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
 
@@ -64,16 +70,15 @@ pub fn EpollCore(
             errdefer gpa.destroy(eventfd_state);
 
             eventfd_state.* = .{
-                .is_eventfd = true,
                 .socket_fd = eventfd_num,
             };
 
             self.* = .{
                 ._gpa = gpa,
                 ._eventfd_state = eventfd_state,
-                ._action_queue = .empty,
-                ._task_queue = .empty,
-                ._yield_queue = .empty,
+                ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
+                ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
+                ._yield_queue = try .initCapacity(gpa, max_num_sockets),
             };
 
             return self;
@@ -81,6 +86,10 @@ pub fn EpollCore(
 
         pub fn deinit(self: *Self) void {
             const gpa = self._gpa;
+
+            self._yield_queue.deinit(gpa);
+            self._task_queue.deinit(gpa);
+            self._action_queue.deinit(gpa);
 
             gpa.destroy(self._eventfd_state);
             gpa.destroy(self);
@@ -93,10 +102,35 @@ pub fn EpollCore(
         fn handleEpollEvent(self: *Self, event: Event) void {
             const data_ptr = EventFuncs.getDataPtr(event);
             const state: *SocketState = @ptrCast(@alignCast(data_ptr));
-            if (state == self._eventfd_state) {
-                // TODO handle
+
+            if (EventFuncs.hasEpollIn(event)) {
+                self.addReadTask(state);
+            }
+
+            if (EventFuncs.hasEpollOut(event)) {
+                self.addWriteTask(state);
+            }
+        }
+
+        fn addReadTask(self: *Self, state: *SocketState) void {
+            if (state.is_reading) {
                 return;
             }
+
+            const task = Task{
+                .task_type = .Read,
+                .state = state,
+            };
+            state.is_reading = true;
+            self._task_queue.pushBackBounded(task) catch unreachable;
+        }
+
+        fn addWriteTask(self: *Self, state: *SocketState) void {
+            const task = Task{
+                .task_type = .Write,
+                .state = state,
+            };
+            self._task_queue.pushBackBounded(task) catch unreachable;
         }
 
         fn handleTask(_: *Self, _: Task) HandleTaskStatus {}
@@ -145,7 +179,7 @@ const CoreTest = struct {
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
 
-        const core = try CoreType.init(gpa, 11);
+        const core = try CoreType.init(gpa, 11, 3);
         errdefer core.deinit();
 
         self.* = .{
@@ -165,16 +199,26 @@ const CoreTest = struct {
     fn handleEpollEvent(self: *Self, event: FakeEvent) void {
         self.core.handleEpollEvent(event);
     }
+
+    fn newEpollEventFD(self: *Self) FakeEvent {
+        return .{
+            .epoll_in = true,
+            .epoll_out = false,
+            .data_ptr = self.core._eventfd_state,
+        };
+    }
 };
+
+const expectEqual = std.testing.expectEqual;
 
 test "handle epoll event" {
     const s = try CoreTest.init();
     defer s.deinit();
 
-    const event = FakeEvent{
-        .epoll_in = true,
-        .epoll_out = false,
-        .data_ptr = s.core._eventfd_state,
-    };
-    s.handleEpollEvent(event);
+    s.handleEpollEvent(s.newEpollEventFD());
+    try expectEqual(1, s.core._task_queue.len);
+
+    // add event fd epoll event again
+    s.handleEpollEvent(s.newEpollEventFD());
+    try expectEqual(1, s.core._task_queue.len);
 }

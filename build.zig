@@ -19,6 +19,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/epoll/root.zig"),
         .target = target,
         .sanitize_thread = enable_tsan,
+        .imports = &.{
+            .{ .name = "zutil", .module = zutil_mod },
+        },
     });
 
     const zcore_mod = b.addModule("zcore", .{

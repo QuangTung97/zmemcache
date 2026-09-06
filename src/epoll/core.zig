@@ -166,12 +166,12 @@ pub fn EpollCore(
             const data_ptr = EventFuncs.getDataPtr(event);
             const state: *SocketState = @ptrCast(@alignCast(data_ptr));
 
-            if (EventFuncs.hasEpollIn(event)) {
-                self.addReadTask(state);
+            if (EventFuncs.hasEpollOut(event)) {
+                self.addWriteTask(state, false);
             }
 
-            if (EventFuncs.hasEpollOut(event)) {
-                self.addWriteTask(state);
+            if (EventFuncs.hasEpollIn(event)) {
+                self.addReadTask(state);
             }
         }
 
@@ -202,19 +202,25 @@ pub fn EpollCore(
             self._task_queue.pushBackBounded(task) catch unreachable;
         }
 
-        fn addWriteTask(self: *Self, state: *SocketState) void {
+        fn addWriteTask(self: *Self, state: *SocketState, to_front: bool) void {
             if (state.write_queue.count() == 0) {
                 return;
             }
-
-            // TODO check duplicated
+            if (state.is_writing) {
+                return;
+            }
 
             const task = Task{
                 .task_type = .Write,
                 .state = state,
             };
             state.is_writing = true;
-            self._task_queue.pushBackBounded(task) catch unreachable;
+
+            if (to_front) {
+                self._task_queue.pushFrontBounded(task) catch unreachable;
+            } else {
+                self._task_queue.pushBackBounded(task) catch unreachable;
+            }
         }
 
         fn handleTask(self: *Self, task: Task) HandleTaskStatus {
@@ -333,7 +339,7 @@ pub fn EpollCore(
             const num_read = if (read_resp) |x| x else |err| {
                 switch (err) {
                     types.SocketError.EAGAIN => {
-                        self.addWriteTask(state);
+                        self.addWriteTask(state, true);
                         return .Next;
                     },
                     types.SocketError.ConnectionError => {
@@ -623,7 +629,9 @@ const CoreTest = struct {
                 continue;
             }
 
+            std.debug.assert(!running_tasks.contains(task));
             try running_tasks.put(task, .{});
+
             std.debug.assert(self.core._all_states.containsSlow(&state.all_state_list));
         }
 
@@ -829,5 +837,9 @@ test "fully read action, with write queue" {
         read_task1.state.callbacks.read_data.items,
     );
     try expectEqual(1, read_task1.state.num_handled_actions);
+    try expectEqual(1, s.core._task_queue.len);
+
+    // try to add write task again
+    s.handleTaskUntilNext(read_task1);
     try expectEqual(1, s.core._task_queue.len);
 }

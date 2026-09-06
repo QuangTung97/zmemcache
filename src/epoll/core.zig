@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const zutil = @import("zutil");
 
 const Allocator = std.mem.Allocator;
 
@@ -20,12 +21,12 @@ pub fn EpollCore(
     EpollFuncs: types.EpollFuncs(EpollType, Event, FD),
     SocketFuncs: types.SocketFuncs(SocketSvc, FD),
     CallbackFuncs: types.CallbackFuncs(CallbackType),
+    comptime max_write_queue_len: usize,
 ) type {
     const ActionType = types.ActionEntry(FD);
     const ActionQueue = std.Deque(ActionType);
 
     const buffer_size = 4 * 1024;
-    const max_write_queue_len = 128;
 
     const SocketState = struct {
         const Self = @This();
@@ -52,7 +53,7 @@ pub fn EpollCore(
         _write_queue_buffer: [max_write_queue_len][]const u8 = undefined,
         write_queue: types.WriteQueue,
 
-        // TODO add linked list of all socket states
+        all_state_list: zutil.ListHead,
 
         fn getTmpBufLen(self: *Self) usize {
             return self.tmp_buf_end - self.tmp_buf_start;
@@ -64,6 +65,15 @@ pub fn EpollCore(
 
         fn getHandleBuf(self: *Self) []u8 {
             return self.handle_buf[0..self.handle_buf_len];
+        }
+
+        fn fromList(entry: *zutil.ListHead) *Self {
+            return @fieldParentPtr("all_state_list", entry);
+        }
+
+        fn destroy(self: *Self) void {
+            CallbackFuncs.onDeinit(&self.callbacks);
+            self.all_state_list.remove();
         }
     };
 
@@ -84,6 +94,7 @@ pub fn EpollCore(
 
         _state_alloc: StateAlloc,
 
+        _all_states: zutil.ListHead,
         _eventfd_state: *SocketState,
 
         // TODO add padding
@@ -106,20 +117,33 @@ pub fn EpollCore(
                 ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
                 ._yield_queue = try .initCapacity(gpa, max_num_sockets),
                 ._state_alloc = try StateAlloc.init(gpa, max_num_sockets + 1),
+                ._all_states = undefined,
                 ._eventfd_state = undefined,
             };
+
+            self._all_states.initHeader();
 
             self._eventfd_state = self._state_alloc.create();
             self._eventfd_state.* = .{
                 .socket_fd = eventfd_num,
                 .callbacks = undefined,
                 .write_queue = undefined,
+                .all_state_list = undefined,
             };
 
             return self;
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
+            // destroy all states
+            var state_it = self._all_states.iterate();
+            while (state_it.next()) |e| {
+                const state = SocketState.fromList(e);
+                state.destroy();
+            }
+
+            std.debug.assert(self._all_states.isEmpty());
+
             self._state_alloc.deinit(gpa);
             self._yield_queue.deinit(gpa);
             self._task_queue.deinit(gpa);
@@ -128,8 +152,11 @@ pub fn EpollCore(
             gpa.destroy(self);
         }
 
-        fn epollWait(_: *Self, buffer: []Event) []Event {
-            return buffer[0..0];
+        fn epollWait(self: *Self, buffer: []Event) []Event {
+            std.debug.assert(self._task_queue.len == 0);
+
+            // TODO handle with wait
+            return EpollFuncs.epollWait(self._epoll, buffer, false);
         }
 
         fn handleEpollEvent(self: *Self, event: Event) void {
@@ -218,7 +245,11 @@ pub fn EpollCore(
                 .read_size = CallbackFuncs.init_read_size,
                 .callbacks = CallbackFuncs.onInit(),
                 .write_queue = types.WriteQueue.init(&conn_state._write_queue_buffer),
+                .all_state_list = undefined,
             };
+
+            // add to all states
+            self._all_states.pushBack(&conn_state.all_state_list);
 
             // add to epoll
             EpollFuncs.epollAdd(self._epoll, new_conn_fd, conn_state);
@@ -241,13 +272,19 @@ pub fn EpollCore(
         }
 
         fn doHandleFullReadData(_: *Self, state: *SocketState) HandleTaskStatus {
-            CallbackFuncs.onReadData(
+            const result = CallbackFuncs.onReadData(
                 &state.callbacks,
                 state.getHandleBuf(),
                 &state.write_queue,
             );
-            state.handle_buf_len = 0;
-            return .Continue;
+
+            switch (result) {
+                .Ok => |x| {
+                    state.read_size = x.next_read_size;
+                    state.handle_buf_len = 0;
+                    return .Continue;
+                },
+            }
         }
 
         fn moveFromTmpBufToHandleBuf(_: *Self, state: *SocketState) HandleTaskStatus {
@@ -371,6 +408,7 @@ const FakeSocketSvc = struct {
         };
 
         @memcpy(buffer[0..data.len], data);
+        _ = self.read_map.remove(fd);
         return data.len;
     }
 };
@@ -381,14 +419,45 @@ const FakeSocketSvc = struct {
 
 const FakeCallbacks = struct {
     const Self = @This();
+    const ReadData = std.ArrayList(u8);
+    const State = enum { Step1, Step2, Step3 };
+
+    read_data: ReadData,
+    state: State,
 
     pub const init_read_size: usize = 1;
 
     pub fn onInit() Self {
-        return .{};
+        return .{
+            .read_data = .empty,
+            .state = .Step1,
+        };
     }
 
-    pub fn onReadData(_: *Self, _: []const u8, _: *types.WriteQueue) void {}
+    pub fn onDeinit(self: *Self) void {
+        const gpa = std.testing.allocator;
+        self.read_data.deinit(gpa);
+    }
+
+    pub fn onReadData(self: *Self, data: []const u8, _: *types.WriteQueue) types.OnReadResult {
+        const gpa = std.testing.allocator;
+        self.read_data.appendSlice(gpa, data) catch unreachable;
+
+        switch (self.state) {
+            .Step1 => {
+                self.state = .Step2;
+                return .initOk(3);
+            },
+            .Step2 => {
+                self.state = .Step3;
+                return .initOk(2);
+            },
+            .Step3 => {
+                self.state = .Step1;
+                return .initOk(init_read_size);
+            }
+        }
+    }
 
     pub fn popWriteFrame(_: *Self) void {}
 };
@@ -415,6 +484,7 @@ const CoreTest = struct {
         EpollFuncs.init(),
         SocketFuncs.init(),
         CallbackFuncs.init(),
+        3,
     );
 
     epoll: FakeEpoll,
@@ -485,6 +555,7 @@ const CoreTest = struct {
 };
 
 const expectEqual = std.testing.expectEqual;
+const expectEqualSlices = std.testing.expectEqualSlices;
 
 test "handle epoll event" {
     const s = try CoreTest.init();
@@ -525,12 +596,21 @@ test "handle epoll event" {
     // handle socket read task
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
     try expectEqual(2, task2.state.tmp_buf_end);
-    try std.testing.expectEqualSlices(u8, &.{ 31, 32 }, task2.state.getTmpBuf());
-    try std.testing.expectEqualSlices(u8, &.{}, task2.state.getHandleBuf());
+    try expectEqualSlices(u8, &.{ 31, 32 }, task2.state.getTmpBuf());
+    try expectEqualSlices(u8, &.{}, task2.state.getHandleBuf());
 
     // move from tmp buf to handle buf
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
     try expectEqual(2, task2.state.tmp_buf_end);
-    try std.testing.expectEqualSlices(u8, &.{32}, task2.state.getTmpBuf());
-    try std.testing.expectEqualSlices(u8, &.{31}, task2.state.getHandleBuf());
+    try expectEqualSlices(u8, &.{32}, task2.state.getTmpBuf());
+    try expectEqualSlices(u8, &.{31}, task2.state.getHandleBuf());
+
+    // run callback
+    try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
+    try expectEqual(2, task2.state.tmp_buf_end);
+    try expectEqualSlices(u8, &.{32}, task2.state.getTmpBuf());
+    try expectEqualSlices(u8, &.{}, task2.state.getHandleBuf());
+    try expectEqual(0, s.core._task_queue.len);
+    try expectEqualSlices(u8, &.{31}, task2.state.callbacks.read_data.items);
+    try expectEqual(3, task2.state.read_size);
 }

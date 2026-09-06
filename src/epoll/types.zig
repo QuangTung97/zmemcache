@@ -4,7 +4,7 @@ const Allocator = std.mem.Allocator;
 
 pub fn EpollFuncs(T: type, Event: type, FD: type) type {
     return struct {
-        epollWait: fn (self: *T, events: []Event, with_wait: bool) []Event,
+        epollWait: fn (self: *T, buffer: []Event, with_wait: bool) []Event,
         epollAdd: fn (self: *T, client_fd: FD, data_ptr: *anyopaque) void,
         epollRemove: fn (self: *T, client_fd: FD) void,
 
@@ -100,11 +100,30 @@ pub const WriteQueue = struct {
     }
 };
 
+pub const OnReadResult = union(enum) {
+    const Self = @This();
+
+    Ok: struct {
+        next_read_size: usize,
+    },
+
+    pub fn initOk(n: usize) Self {
+        return .{
+            .Ok = .{
+                .next_read_size = n,
+            },
+        };
+    }
+};
+
 pub fn CallbackFuncs(T: type) type {
     return struct {
         init_read_size: usize,
+
         onInit: fn () T,
-        onReadData: fn (self: *T, data: []const u8, write_queue: *WriteQueue) void,
+        onDeinit: fn (self: *T) void,
+
+        onReadData: fn (self: *T, data: []const u8, write_queue: *WriteQueue) OnReadResult,
         popWriteFrame: fn (self: *T) void,
 
         const Self = @This();
@@ -112,7 +131,10 @@ pub fn CallbackFuncs(T: type) type {
         pub fn init() Self {
             return .{
                 .init_read_size = T.init_read_size,
+
                 .onInit = T.onInit,
+                .onDeinit = T.onDeinit,
+
                 .onReadData = T.onReadData,
                 .popWriteFrame = T.popWriteFrame,
             };

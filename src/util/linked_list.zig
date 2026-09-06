@@ -108,6 +108,10 @@ pub const ListHead = struct {
             .current = head.prev,
         };
     }
+
+    pub fn isEmpty(head: *Self) bool {
+        return head.next == head;
+    }
 };
 
 // ===========================================================================
@@ -267,4 +271,26 @@ test "push front" {
     // iterate backward
     var iter2 = head.iterateBackward();
     try expectIterValues(&.{ 21, 22, 23 }, &iter2);
+}
+
+test "iterate and remove at the same time" {
+    var head: ListHead = undefined;
+    head.initHeader();
+
+    var e1 = TestEntry.init(21);
+    var e2 = TestEntry.init(22);
+    var e3 = TestEntry.init(23);
+
+    head.pushBack(&e1.list);
+    head.pushBack(&e2.list);
+    head.pushBack(&e3.list);
+    try expectEqual(false, head.isEmpty());
+
+    var it = head.iterate();
+    while (it.next()) |e| {
+        e.remove();
+    }
+
+    try expectListValues(&.{}, &head);
+    try expectEqual(true, head.isEmpty());
 }

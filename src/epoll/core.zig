@@ -184,8 +184,10 @@ pub fn EpollCore(
             const task = if (null_task) |x| x else {
                 return null;
             };
-            // TODO clear all
+
             task.state.is_reading = false;
+            task.state.is_writing = false;
+
             return task;
         }
 
@@ -838,8 +840,16 @@ test "fully read action, with write queue" {
     );
     try expectEqual(1, read_task1.state.num_handled_actions);
     try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(2, read_task1.state.write_queue.count());
 
     // try to add write task again
     s.handleTaskUntilNext(read_task1);
     try expectEqual(1, s.core._task_queue.len);
+
+    // pop write task
+    const write_task1 = s.popTaskQueue().?;
+    try expectEqual(.Write, write_task1.task_type);
+    try expectEqual(false, write_task1.state.is_writing);
+    // handle write
+    try expectEqual(.Continue, s.handleTask(write_task1));
 }

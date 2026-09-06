@@ -38,7 +38,7 @@ pub fn EventFuncs(Event: type) type {
     };
 }
 
-pub const SocketError = error{ EAGAIN, ConnectionError, SocketClosed };
+pub const SocketError = error{ EAGAIN, ConnectionError };
 
 pub fn SocketFuncs(T: type, FD: type) type {
     return struct {

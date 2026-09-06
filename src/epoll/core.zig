@@ -310,8 +310,15 @@ pub fn EpollCore(
                 &state.tmp_buf,
             );
 
-            const num_read = if (read_resp) |x| x else |_| {
-                @panic("TODO");
+            const num_read = if (read_resp) |x| x else |err| {
+                switch (err) {
+                    types.SocketError.EAGAIN => {
+                        return .Next;
+                    },
+                    types.SocketError.ConnectionError => {
+                        @panic( "TODO");
+                    }
+                }
             };
 
             std.debug.assert(num_read > 0);
@@ -613,4 +620,17 @@ test "handle epoll event" {
     try expectEqual(0, s.core._task_queue.len);
     try expectEqualSlices(u8, &.{31}, task2.state.callbacks.read_data.items);
     try expectEqual(3, task2.state.read_size);
+
+    // move from tmp buf to handle buf again
+    try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
+    try expectEqual(2, task2.state.tmp_buf_end);
+    try expectEqualSlices(u8, &.{}, task2.state.getTmpBuf());
+    try expectEqualSlices(u8, &.{32}, task2.state.getHandleBuf());
+    try expectEqual(3, task2.state.read_size);
+
+    // read with EAGAIN
+    try expectEqual(HandleTaskStatus.Next, s.handleTask(task2));
+    try expectEqualSlices(u8, &.{32}, task2.state.getHandleBuf());
+    try expectEqual(3, task2.state.read_size);
+    try expectEqual(0, s.core._task_queue.len);
 }

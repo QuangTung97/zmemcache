@@ -27,6 +27,8 @@ pub fn EpollCore(
     const buffer_size = 4 * 1024;
 
     const SocketState = struct {
+        const Self = @This();
+
         socket_fd: FD,
 
         is_reading: bool = false,
@@ -45,6 +47,18 @@ pub fn EpollCore(
         handle_buf_len: usize = 0,
 
         // TODO add linked list of all socket states
+
+        fn getTmpBufLen(self: *Self) usize {
+            return self.tmp_buf_end - self.tmp_buf_start;
+        }
+
+        fn getTmpBuf(self: *Self) []u8 {
+            return self.tmp_buf[self.tmp_buf_start..self.tmp_buf_end];
+        }
+
+        fn getHandleBuf(self: *Self) []u8 {
+            return self.handle_buf[0..self.handle_buf_len];
+        }
     };
 
     return struct {
@@ -202,16 +216,43 @@ pub fn EpollCore(
         }
 
         fn handleReadSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            if (state.getTmpBufLen() > 0) {
+                return self.moveFromTmpBufToHandleBuf(state);
+            }
+            return self.doReadFromSocket(state);
+        }
+
+        fn moveFromTmpBufToHandleBuf(_: *Self, state: *SocketState) HandleTaskStatus {
+            const remain = state.read_size.? - state.handle_buf_len;
+            const n = @min(remain, state.getTmpBufLen());
+
+            const start = state.handle_buf_len;
+            const end = start + n;
+            state.handle_buf_len = end;
+
+            const tmp_start = state.tmp_buf_start;
+            const tmp_end = tmp_start + n;
+            state.tmp_buf_start = tmp_end;
+
+            @memcpy(state.handle_buf[start..end], state.tmp_buf[tmp_start..tmp_end]);
+            return .Continue;
+        }
+
+        fn doReadFromSocket(self: *Self, state: *SocketState) HandleTaskStatus {
             const read_resp = SocketFuncs.read(
                 self._socket_svc,
                 state.socket_fd,
                 &state.tmp_buf,
             );
-            if (read_resp) |_| {
+
+            const num_read = if (read_resp) |x| x else |_| {
                 @panic("TODO");
-            } else |_| {
-                @panic("TODO");
-            }
+            };
+
+            std.debug.assert(num_read > 0);
+            // TODO set start
+            state.tmp_buf_end = num_read;
+            return .Continue;
         }
 
         fn handleWriteSocket(_: *Self, _: *SocketState) HandleTaskStatus {
@@ -281,13 +322,28 @@ const FakeEpoll = struct {
 
 const FakeSocketSvc = struct {
     const Self = @This();
+    const ReadMap = std.AutoHashMap(u64, []const u8);
 
-    pub fn init() Self {
-        return .{};
+    read_map: ReadMap,
+
+    fn init(gpa: Allocator) Self {
+        return .{
+            .read_map = ReadMap.init(gpa),
+        };
     }
 
-    pub fn read(_: *Self, _: u64, _: []u8) types.SocketError!usize {
-        return 0;
+    fn deinit(self: *Self) void {
+        self.read_map.deinit();
+    }
+
+    pub fn read(self: *Self, fd: u64, buffer: []u8) types.SocketError!usize {
+        const null_bytes = self.read_map.get(fd);
+        const data = if (null_bytes) |x| x else {
+            return types.SocketError.EAGAIN;
+        };
+
+        @memcpy(buffer[0..data.len], data);
+        return data.len;
     }
 };
 
@@ -324,7 +380,7 @@ const CoreTest = struct {
 
         self.* = .{
             .epoll = FakeEpoll.init(gpa),
-            .socket_svc = FakeSocketSvc.init(),
+            .socket_svc = FakeSocketSvc.init(gpa),
             .core = undefined,
         };
 
@@ -344,6 +400,7 @@ const CoreTest = struct {
         const gpa = std.testing.allocator;
 
         self.core.deinit(gpa);
+        self.socket_svc.deinit();
         self.epoll.deinit();
 
         gpa.destroy(self);
@@ -371,6 +428,10 @@ const CoreTest = struct {
             .epoll_out = false,
             .data_ptr = self.core._eventfd_state,
         };
+    }
+
+    fn setReadData(self: *Self, fd: u64, data: []const u8) void {
+        self.socket_svc.read_map.put(fd, data) catch unreachable;
     }
 };
 
@@ -404,7 +465,23 @@ test "handle epoll event" {
     try expectEqual(1, s.epoll.socket_map.count());
     try expectEqual(true, s.epoll.socket_map.contains(21));
 
-    // handle read from socket task
+    // stub read data
+    s.setReadData(21, &.{ 31, 32 });
+
+    // pop socket read task
     const task2 = s.popTaskQueue().?;
+    try expectEqual(TaskType.Read, task2.task_type);
+    try expectEqual(1, task2.state.read_size);
+
+    // handle socket read task
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
+    try expectEqual(2, task2.state.tmp_buf_end);
+    try std.testing.expectEqualSlices(u8, &.{ 31, 32 }, task2.state.getTmpBuf());
+    try std.testing.expectEqualSlices(u8, &.{}, task2.state.getHandleBuf());
+
+    // move from tmp buf to handle buf
+    try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
+    try expectEqual(2, task2.state.tmp_buf_end);
+    try std.testing.expectEqualSlices(u8, &.{32}, task2.state.getTmpBuf());
+    try std.testing.expectEqualSlices(u8, &.{31}, task2.state.getHandleBuf());
 }

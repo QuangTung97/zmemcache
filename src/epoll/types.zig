@@ -107,6 +107,8 @@ pub const OnReadResult = union(enum) {
         next_read_size: usize,
     },
 
+    // TODO add wait write queue
+
     pub fn initOk(n: usize) Self {
         return .{
             .Ok = .{
@@ -123,7 +125,12 @@ pub fn CallbackFuncs(T: type) type {
         onInit: fn () T,
         onDeinit: fn (self: *T) void,
 
-        onReadData: fn (self: *T, data: []const u8, write_queue: *WriteQueue) OnReadResult,
+        onReadData: fn (
+            self: *T,
+            data: []const u8,
+            write_queue: *WriteQueue,
+            finished: *bool, // current action is finished
+        ) OnReadResult,
         popWriteFrame: fn (self: *T) void,
 
         const Self = @This();

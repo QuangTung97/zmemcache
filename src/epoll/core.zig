@@ -78,12 +78,15 @@ pub fn EpollCore(
     };
 
     return struct {
+        const CoreSocketState = SocketState;
+
         const Task = struct {
             task_type: TaskType,
             state: *SocketState,
         };
         const TaskQueue = std.Deque(Task);
         const StateAlloc = types.StackAllocator(SocketState);
+
         const Self = @This();
 
         _epoll: *EpollType,
@@ -200,10 +203,17 @@ pub fn EpollCore(
         }
 
         fn addWriteTask(self: *Self, state: *SocketState) void {
+            if (state.write_queue.count() == 0) {
+                return;
+            }
+
+            // TODO check duplicated
+
             const task = Task{
                 .task_type = .Write,
                 .state = state,
             };
+            state.is_writing = true;
             self._task_queue.pushBackBounded(task) catch unreachable;
         }
 
@@ -286,6 +296,9 @@ pub fn EpollCore(
                 .Ok => |x| {
                     state.read_size = x.next_read_size;
                     state.handle_buf_len = 0;
+                    if (is_finished_action) {
+                        state.num_handled_actions += 1;
+                    }
                     return .Continue;
                 },
             }
@@ -320,6 +333,7 @@ pub fn EpollCore(
             const num_read = if (read_resp) |x| x else |err| {
                 switch (err) {
                     types.SocketError.EAGAIN => {
+                        self.addWriteTask(state);
                         return .Next;
                     },
                     types.SocketError.ConnectionError => {
@@ -437,6 +451,7 @@ const FakeCallbacks = struct {
 
     read_data: ReadData,
     state: State,
+    num_writes: usize,
 
     pub const init_read_size: usize = 1;
 
@@ -444,6 +459,7 @@ const FakeCallbacks = struct {
         return .{
             .read_data = .empty,
             .state = .Step1,
+            .num_writes = 0,
         };
     }
 
@@ -455,7 +471,7 @@ const FakeCallbacks = struct {
     pub fn onReadData(
         self: *Self,
         data: []const u8,
-        _: *types.WriteQueue,
+        write_queue: *types.WriteQueue,
         finished: *bool,
     ) types.OnReadResult {
         const gpa = std.testing.allocator;
@@ -473,6 +489,13 @@ const FakeCallbacks = struct {
             .Step3 => {
                 self.state = .Step1;
                 finished.* = true;
+
+                const val1: u8 = @intCast(self.num_writes + 41);
+                self.num_writes += 2;
+
+                write_queue.addWriteFrame(&.{ val1, val1 + 1 });
+                write_queue.addWriteFrame(&.{ val1 + 2, val1 + 3 });
+
                 return .initOk(init_read_size);
             },
         }
@@ -505,6 +528,9 @@ const CoreTest = struct {
         CallbackFuncs.init(),
         3,
     );
+
+    const Task = CoreType.Task;
+    const SocketState = CoreType.CoreSocketState;
 
     epoll: FakeEpoll,
     socket_svc: FakeSocketSvc,
@@ -545,19 +571,92 @@ const CoreTest = struct {
     }
 
     fn handleEpollEvent(self: *Self, event: FakeEvent) void {
+        defer self.checkInvariant();
         self.core.handleEpollEvent(event);
     }
 
     fn addActionNewConn(self: *Self, fd: u64) void {
-        self.core.addActionQueue(.{ .NewConn = .{ .fd = fd } });
+        self.core.addActionQueue(.{
+            .NewConn = .{ .fd = fd },
+        });
     }
 
-    fn popTaskQueue(self: *Self) ?CoreType.Task {
+    fn popTaskQueue(self: *Self) ?Task {
+        defer self.checkInvariant();
         return self.core.popTaskQueue();
     }
 
-    fn handleTask(self: *Self, task: CoreType.Task) HandleTaskStatus {
-        return self.core.handleTask(task);
+    fn handleTask(self: *Self, task: Task) HandleTaskStatus {
+        defer self.checkInvariant();
+
+        const status = self.core.handleTask(task);
+        if (status == .Next) {
+            self.checkOnNextInv(task.state);
+        }
+
+        return status;
+    }
+
+    fn checkInvariant(self: *Self) void {
+        self.checkInvariantErr() catch unreachable;
+    }
+
+    fn checkInvariantErr(self: *Self) !void {
+        const gpa = std.testing.allocator;
+
+        var running_tasks = std.AutoHashMap(Task, struct {}).init(gpa);
+        defer running_tasks.deinit();
+
+        var task_iter = self.core._task_queue.iterator();
+        while (task_iter.next()) |task| {
+            const state = task.state;
+            switch (task.task_type) {
+                .Read => {
+                    std.debug.assert(state.is_reading);
+                },
+                .Write => {
+                    std.debug.assert(state.is_writing);
+                },
+            }
+
+            if (state == self.core._eventfd_state) {
+                continue;
+            }
+
+            try running_tasks.put(task, .{});
+            std.debug.assert(self.core._all_states.containsSlow(&state.all_state_list));
+        }
+
+        var state_iter = self.core._all_states.iterate();
+        while (state_iter.next()) |x| {
+            const state = SocketState.fromList(x);
+
+            std.debug.assert(state.getHandleBuf().len <= state.read_size);
+            std.debug.assert(state.callbacks.num_writes == state.write_queue.count());
+
+            if (state.is_reading) {
+                std.debug.assert(running_tasks.contains(.{
+                    .task_type = .Read,
+                    .state = state,
+                }));
+            }
+            if (state.is_writing) {
+                std.debug.assert(running_tasks.contains(.{
+                    .task_type = .Write,
+                    .state = state,
+                }));
+            }
+        }
+    }
+
+    fn checkOnNextInv(self: *Self, state: *SocketState) void {
+        if (state == self.core._eventfd_state) {
+            return;
+        }
+
+        if (state.write_queue.count() > 0) {
+            std.debug.assert(state.is_writing);
+        }
     }
 
     fn newEpollEventFD(self: *Self) FakeEvent {
@@ -578,6 +677,35 @@ const CoreTest = struct {
             .epoll_out = false,
             .data_ptr = self.epoll.socket_map.get(fd).?,
         };
+    }
+
+    fn addSocketFD(self: *Self, fd: u64) !void {
+        // before
+        try expectEqual(0, self.core._action_queue.len);
+        try expectEqual(0, self.core._task_queue.len);
+
+        self.handleEpollEvent(self.newEpollEventFD());
+        self.addActionNewConn(fd);
+
+        // pop and handle task
+        const task = self.popTaskQueue().?;
+        try expectEqual(HandleTaskStatus.Continue, self.handleTask(task));
+        try expectEqual(HandleTaskStatus.Next, self.handleTask(task));
+
+        // after
+        try expectEqual(0, self.core._action_queue.len);
+    }
+
+    fn handleTaskUntilNext(self: *Self, task: Task) void {
+        while (true) {
+            const result = self.handleTask(task);
+            switch (result) {
+                .Next => {
+                    return;
+                },
+                .Continue => {},
+            }
+        }
     }
 };
 
@@ -681,4 +809,25 @@ test "handle epoll event" {
     try expectEqualSlices(u8, &.{}, task3.state.getHandleBuf());
     try expectEqualSlices(u8, &.{ 31, 32, 33, 34 }, task3.state.callbacks.read_data.items);
     try expectEqual(0, s.core._task_queue.len);
+}
+
+test "fully read action, with write queue" {
+    const s = try CoreTest.init();
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    s.setReadData(socket_fd1, &.{ 31, 32, 33, 34, 35, 36 });
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    // check after finish first action
+    try expectEqualSlices(
+        u8,
+        &.{ 31, 32, 33, 34, 35, 36 },
+        read_task1.state.callbacks.read_data.items,
+    );
+    try expectEqual(1, read_task1.state.num_handled_actions);
+    try expectEqual(1, s.core._task_queue.len);
 }

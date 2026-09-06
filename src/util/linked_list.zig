@@ -112,6 +112,16 @@ pub const ListHead = struct {
     pub fn isEmpty(head: *Self) bool {
         return head.next == head;
     }
+
+    pub fn containsSlow(head: *Self, node: *Self) bool {
+        var iter = head.iterate();
+        while (iter.next()) |x| {
+            if (x == node) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 // ===========================================================================
@@ -280,11 +290,13 @@ test "iterate and remove at the same time" {
     var e1 = TestEntry.init(21);
     var e2 = TestEntry.init(22);
     var e3 = TestEntry.init(23);
+    try expectEqual(false, head.containsSlow(&e2.list));
 
     head.pushBack(&e1.list);
     head.pushBack(&e2.list);
     head.pushBack(&e3.list);
     try expectEqual(false, head.isEmpty());
+    try expectEqual(true, head.containsSlow(&e2.list));
 
     var it = head.iterate();
     while (it.next()) |e| {

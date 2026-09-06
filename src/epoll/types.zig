@@ -67,7 +67,7 @@ pub fn ActionEntry(FD: type) type {
         NewConn: struct {
             fd: FD,
         },
-        Shutdown: struct {},
+        Shutdown: struct {}, // TODO use
     };
 }
 
@@ -97,6 +97,10 @@ pub const WriteQueue = struct {
 
     pub fn allowNumItems(self: *const Self, num_items: usize) bool {
         return self._queue.len + num_items <= self._queue.buffer.len;
+    }
+
+    pub fn count(self: *const Self) usize {
+        return self._queue.len;
     }
 };
 

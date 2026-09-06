@@ -57,8 +57,8 @@ pub fn SocketFuncs(T: type, FD: type) type {
 
 pub fn EventFdFuncs(FD: type) type {
     return struct {
-        drain: fn (fd: FD) void,
-        inc: fn (fd: FD) void,
+        drain: fn (fd: FD) void, // TODO use
+        inc: fn (fd: FD) void, // TODO use
     };
 }
 
@@ -75,14 +75,11 @@ pub const WriteQueue = struct {
     const Self = @This();
     const Queue = std.Deque([]const u8);
 
-    _gpa: Allocator,
     _queue: Queue,
 
-    pub fn init(gpa: Allocator, queue_size: usize) !Self {
-        const queue = try Queue.initCapacity(gpa, queue_size);
+    pub fn init(buffer: [][]const u8) Self {
         return .{
-            ._gpa = gpa,
-            ._queue = queue,
+            ._queue = Queue.initBuffer(buffer),
         };
     }
 
@@ -98,10 +95,6 @@ pub const WriteQueue = struct {
         return self._queue.iterator();
     }
 
-    pub fn deinit(self: *Self) void {
-        self._queue.deinit(self._gpa);
-    }
-
     pub fn allowNumItems(self: *const Self, num_items: usize) bool {
         return self._queue.len + num_items <= self._queue.buffer.len;
     }
@@ -109,8 +102,21 @@ pub const WriteQueue = struct {
 
 pub fn CallbackFuncs(T: type) type {
     return struct {
-        onReadData: fn (self: *T, data: []const u8, writeQueue: *WriteQueue) void,
+        init_read_size: usize,
+        onInit: fn () T,
+        onReadData: fn (self: *T, data: []const u8, write_queue: *WriteQueue) void,
         popWriteFrame: fn (self: *T) void,
+
+        const Self = @This();
+
+        pub fn init() Self {
+            return .{
+                .init_read_size = T.init_read_size,
+                .onInit = T.onInit,
+                .onReadData = T.onReadData,
+                .popWriteFrame = T.popWriteFrame,
+            };
+        }
     };
 }
 
@@ -156,9 +162,8 @@ pub fn StackAllocator(T: type) type {
 }
 
 test "writer queue" {
-    const gpa = std.testing.allocator;
-    var w = try WriteQueue.init(gpa, 3);
-    defer w.deinit();
+    var buffer: [3][]const u8 = undefined;
+    var w = WriteQueue.init(&buffer);
 
     try std.testing.expectEqual(true, w.allowNumItems(3));
     try std.testing.expectEqual(false, w.allowNumItems(4));

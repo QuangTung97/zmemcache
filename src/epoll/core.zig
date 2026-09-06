@@ -5,8 +5,6 @@ const Allocator = std.mem.Allocator;
 
 const TaskType = enum { Read, Write };
 
-const initial_read_size = 1;
-
 const HandleTaskStatus = enum {
     Continue, // loop right away
     Next, // go to the next task
@@ -17,14 +15,17 @@ pub fn EpollCore(
     Event: type,
     EpollType: type,
     SocketSvc: type,
+    CallbackType: type,
     EventFuncs: types.EventFuncs(Event),
     EpollFuncs: types.EpollFuncs(EpollType, Event, FD),
     SocketFuncs: types.SocketFuncs(SocketSvc, FD),
+    CallbackFuncs: types.CallbackFuncs(CallbackType),
 ) type {
     const ActionType = types.ActionEntry(FD);
     const ActionQueue = std.Deque(ActionType);
 
     const buffer_size = 4 * 1024;
+    const max_write_queue_len = 128;
 
     const SocketState = struct {
         const Self = @This();
@@ -42,9 +43,14 @@ pub fn EpollCore(
         tmp_buf_start: usize = 0,
         tmp_buf_end: usize = 0,
 
-        read_size: ?usize = null,
+        read_size: usize = 0,
         handle_buf: [buffer_size]u8 = undefined,
         handle_buf_len: usize = 0,
+
+        callbacks: CallbackType,
+
+        _write_queue_buffer: [max_write_queue_len][]const u8 = undefined,
+        write_queue: types.WriteQueue,
 
         // TODO add linked list of all socket states
 
@@ -75,7 +81,9 @@ pub fn EpollCore(
         _action_queue: ActionQueue,
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
+
         _state_alloc: StateAlloc,
+
         _eventfd_state: *SocketState,
 
         // TODO add padding
@@ -104,6 +112,8 @@ pub fn EpollCore(
             self._eventfd_state = self._state_alloc.create();
             self._eventfd_state.* = .{
                 .socket_fd = eventfd_num,
+                .callbacks = undefined,
+                .write_queue = undefined,
             };
 
             return self;
@@ -186,6 +196,7 @@ pub fn EpollCore(
             const null_action = self._action_queue.popFront();
             const action = if (null_action) |x| x else {
                 // TODO clear num handled actions
+                // TODO drain eventfd
                 return .Next;
             };
 
@@ -204,7 +215,9 @@ pub fn EpollCore(
             const conn_state = self._state_alloc.create();
             conn_state.* = .{
                 .socket_fd = new_conn_fd,
-                .read_size = initial_read_size,
+                .read_size = CallbackFuncs.init_read_size,
+                .callbacks = CallbackFuncs.onInit(),
+                .write_queue = types.WriteQueue.init(&conn_state._write_queue_buffer),
             };
 
             // add to epoll
@@ -216,14 +229,29 @@ pub fn EpollCore(
         }
 
         fn handleReadSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            std.debug.assert(state.read_size > 0);
+
+            if (state.handle_buf_len >= state.read_size) {
+                return self.doHandleFullReadData(state);
+            }
             if (state.getTmpBufLen() > 0) {
                 return self.moveFromTmpBufToHandleBuf(state);
             }
             return self.doReadFromSocket(state);
         }
 
+        fn doHandleFullReadData(_: *Self, state: *SocketState) HandleTaskStatus {
+            CallbackFuncs.onReadData(
+                &state.callbacks,
+                state.getHandleBuf(),
+                &state.write_queue,
+            );
+            state.handle_buf_len = 0;
+            return .Continue;
+        }
+
         fn moveFromTmpBufToHandleBuf(_: *Self, state: *SocketState) HandleTaskStatus {
-            const remain = state.read_size.? - state.handle_buf_len;
+            const remain = state.read_size - state.handle_buf_len;
             const n = @min(remain, state.getTmpBufLen());
 
             const start = state.handle_buf_len;
@@ -348,6 +376,24 @@ const FakeSocketSvc = struct {
 };
 
 // ===========================================================================
+// Fake Callbacks
+// ===========================================================================
+
+const FakeCallbacks = struct {
+    const Self = @This();
+
+    pub const init_read_size: usize = 1;
+
+    pub fn onInit() Self {
+        return .{};
+    }
+
+    pub fn onReadData(_: *Self, _: []const u8, _: *types.WriteQueue) void {}
+
+    pub fn popWriteFrame(_: *Self) void {}
+};
+
+// ===========================================================================
 // Testing
 // ===========================================================================
 
@@ -357,15 +403,18 @@ const CoreTest = struct {
     const EventFuncs = types.EventFuncs(FakeEvent);
     const EpollFuncs = types.EpollFuncs(FakeEpoll, FakeEvent, u64);
     const SocketFuncs = types.SocketFuncs(FakeSocketSvc, u64);
+    const CallbackFuncs = types.CallbackFuncs(FakeCallbacks);
 
     const CoreType = EpollCore(
         u64,
         FakeEvent,
         FakeEpoll,
         FakeSocketSvc,
+        FakeCallbacks,
         EventFuncs.init(),
         EpollFuncs.init(),
         SocketFuncs.init(),
+        CallbackFuncs.init(),
     );
 
     epoll: FakeEpoll,

@@ -95,7 +95,10 @@ pub fn EpollCore(
 
         _epoll: *EpollType,
         _socket_svc: *SocketSvc,
+
+        _write_queue_capacity: usize,
         _max_consecutive_read: usize,
+        _max_total_read_before_yield: usize,
 
         _action_queue: ActionQueue,
         _task_queue: TaskQueue,
@@ -108,27 +111,43 @@ pub fn EpollCore(
         _padding1: [64]u8 = undefined,
         _num_active_conns: zatomic.Value(u64) = .init(0),
 
+        _total_num_read: usize = 0,
+
+        pub const Config = struct {
+            max_num_sockets: usize,
+            write_queue_capacity: usize,
+            max_consecutive_read: usize,
+            max_total_read_before_yield: usize,
+        };
+
         pub fn init(
             gpa: Allocator,
             epoll: *EpollType,
             socket_svc: *SocketSvc,
             eventfd_num: FD,
-            max_num_sockets: usize,
-            max_consecutive_read: usize,
+            config: Config,
         ) !*Self {
+            zutil.runtimeAssert(config.write_queue_capacity <= max_write_queue_len);
+
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
 
             self.* = .{
                 ._epoll = epoll,
                 ._socket_svc = socket_svc,
-                ._max_consecutive_read = max_consecutive_read,
+
+                ._write_queue_capacity = config.write_queue_capacity,
+                ._max_consecutive_read = config.max_consecutive_read,
+                ._max_total_read_before_yield = config.max_total_read_before_yield,
 
                 ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
-                ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
-                ._yield_queue = try .initCapacity(gpa, max_num_sockets),
+                ._task_queue = try .initCapacity(gpa, config.max_num_sockets * 2 + 1),
+                ._yield_queue = try .initCapacity(gpa, config.max_num_sockets),
 
-                ._state_alloc = try StateAlloc.init(gpa, max_num_sockets + 1),
+                ._state_alloc = try StateAlloc.init(
+                    gpa,
+                    config.max_num_sockets + 1,
+                ),
                 ._all_states = undefined,
                 ._eventfd_state = undefined,
             };
@@ -225,6 +244,15 @@ pub fn EpollCore(
             self._task_queue.pushBackBounded(task) catch unreachable;
         }
 
+        fn yieldReadTask(self: *Self, state: *SocketState) void {
+            const task = Task{
+                .task_type = .Read,
+                .state = state,
+            };
+            state.reading_yielded = true;
+            self._yield_queue.pushBackBounded(task) catch unreachable;
+        }
+
         const AddWriteFrom = enum { EpollOut, AfterRead };
 
         fn addWriteTask(self: *Self, state: *SocketState, from: AddWriteFrom) void {
@@ -289,13 +317,15 @@ pub fn EpollCore(
                 .socket_fd = new_conn_fd,
                 .read_size = CallbackFuncs.init_read_size,
                 .callbacks = CallbackFuncs.onInit(),
-                .write_queue = types.WriteQueue.init(&conn_state._write_queue_buffer),
+                .write_queue = types.WriteQueue.init(
+                    conn_state._write_queue_buffer[0..self._write_queue_capacity],
+                ),
                 .all_state_list = undefined,
             };
 
             // add to all states
             self._all_states.pushBack(&conn_state.all_state_list);
-            _ = self._num_active_conns.fetchAdd(1);
+            _ = self._num_active_conns.fetchAdd(1); // TODO remove
 
             // add to epoll
             EpollFuncs.epollAdd(self._epoll, new_conn_fd, conn_state);
@@ -304,6 +334,16 @@ pub fn EpollCore(
 
         fn handleReadSocket(self: *Self, state: *SocketState) HandleTaskStatus {
             std.debug.assert(state.read_size > 0);
+
+            if (self._total_num_read >= self._max_total_read_before_yield) {
+                self.yieldReadTask(state);
+                return self.doReadReturnNext(state);
+            }
+
+            if (state.num_consecutive_read >= self._max_consecutive_read) {
+                self.addReadTask(state);
+                return self.doReadReturnNext(state);
+            }
 
             if (state.handle_buf_len >= state.read_size) {
                 return self.doHandleFullReadData(state);
@@ -340,10 +380,8 @@ pub fn EpollCore(
                     }
 
                     state.num_consecutive_read += 1;
-                    if (state.num_consecutive_read >= self._max_consecutive_read) {
-                        self.addReadTask(state);
-                        return self.doReadReturnNext(state);
-                    }
+                    self._total_num_read += 1;
+
                     return .Continue;
                 },
                 .WaitWriteQueue => {
@@ -690,7 +728,7 @@ const CoreTest = struct {
         EpollFuncs.init(),
         SocketFuncs.init(),
         CallbackFuncs.init(),
-        5,
+        50,
     );
 
     const Task = CoreType.Task;
@@ -701,7 +739,9 @@ const CoreTest = struct {
     core: *CoreType,
 
     const Config = struct {
+        write_queue_capacity: usize = 5,
         max_consecutive_read: usize = 10,
+        max_total_read_before_yield: usize = 20,
     };
 
     fn init(config: Config) !*Self {
@@ -721,8 +761,12 @@ const CoreTest = struct {
             &self.epoll,
             &self.socket_svc,
             11,
-            3,
-            config.max_consecutive_read,
+            .{
+                .max_num_sockets = 3,
+                .write_queue_capacity = config.write_queue_capacity,
+                .max_consecutive_read = config.max_consecutive_read,
+                .max_total_read_before_yield = config.max_total_read_before_yield,
+            },
         );
         errdefer self.core.deinit();
 
@@ -778,6 +822,9 @@ const CoreTest = struct {
         var running_tasks = std.AutoHashMap(Task, struct {}).init(gpa);
         defer running_tasks.deinit();
 
+        // --------------------------------
+        // iterate task queue
+        // --------------------------------
         var task_iter = self.core._task_queue.iterator();
         while (task_iter.next()) |task| {
             const state = task.state;
@@ -798,11 +845,11 @@ const CoreTest = struct {
             try running_tasks.put(task, .{});
 
             std.debug.assert(self.core._all_states.containsSlow(&state.all_state_list));
-
-            assertImply(state.write_queue_full, !state.is_reading);
-            assertImply(state.socket_send_full, !state.is_writing);
         }
 
+        // --------------------------------
+        // iterate all states
+        // --------------------------------
         var state_iter = self.core._all_states.iterate();
         var num_states: u64 = 0;
         while (state_iter.next()) |x| {
@@ -824,9 +871,23 @@ const CoreTest = struct {
                     .state = state,
                 }));
             }
+
+            assertImply(state.write_queue_full, !state.is_reading);
+            assertImply(state.socket_send_full, !state.is_writing);
+            assertImply(state.reading_yielded, !state.is_reading);
         }
 
         std.debug.assert(self.core._num_active_conns.load() == num_states);
+
+        // --------------------------------
+        // iterate yield queue
+        // --------------------------------
+        var yield_iter = self.core._yield_queue.iterator();
+        while (yield_iter.next()) |task| {
+            std.debug.assert(task.task_type == .Read);
+            const state = task.state;
+            std.debug.assert(state.reading_yielded);
+        }
     }
 
     fn checkOnNextInv(self: *Self, state: *SocketState) void {
@@ -842,7 +903,7 @@ const CoreTest = struct {
 
         std.debug.assert(state.num_consecutive_read == 0);
 
-        assertImply(state.getTmpBuf().len > 0, state.is_reading);
+        assertImply(state.getTmpBuf().len > 0, state.is_reading or state.reading_yielded);
         assertImply(
             state.getHandleBuf().len == state.read_size,
             state.is_reading or state.write_queue_full,
@@ -1169,4 +1230,31 @@ test "write queue is full" {
     // final write EAGAIN
     try expectEqual(.Next, s.handleTask(write_task2));
     try expectEqual(0, s.core._task_queue.len);
+}
+
+test "with yield queue, when reaching total max read" {
+    const s = try CoreTest.init(.{
+        .max_total_read_before_yield = 2,
+        .write_queue_capacity = 20,
+    });
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // read util next
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 } ** 3;
+    s.setReadData(socket_fd1, &read_data);
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    const state1 = read_task1.state;
+    try expectEqual(4, state1.write_queue.count());
+    try expectEqual(1, s.core._task_queue.len);
+
+    // check yield queue
+    try expectEqual(1, s.core._yield_queue.len);
+    try expectEqual(true, state1.reading_yielded);
+    try expectEqual(false, state1.is_reading);
+    try expectEqual(.Read, s.core._yield_queue.at(0).task_type);
 }

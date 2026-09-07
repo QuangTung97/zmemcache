@@ -36,7 +36,7 @@ pub fn EpollCore(
 
         is_reading: bool = false,
         is_writing: bool = false,
-        num_handled_actions: usize = 0,
+        num_consecutive_read: usize = 0,
 
         client_closed: bool = false,
         server_closed: bool = false,
@@ -87,12 +87,13 @@ pub fn EpollCore(
 
         _epoll: *EpollType,
         _socket_svc: *SocketSvc,
+        _max_consecutive_read: usize,
+
         _action_queue: ActionQueue,
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
 
         _state_alloc: StateAlloc,
-
         _all_states: zutil.ListHead,
         _eventfd_state: *SocketState,
 
@@ -105,6 +106,7 @@ pub fn EpollCore(
             socket_svc: *SocketSvc,
             eventfd_num: FD,
             max_num_sockets: usize,
+            max_consecutive_read: usize,
         ) !*Self {
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
@@ -112,9 +114,12 @@ pub fn EpollCore(
             self.* = .{
                 ._epoll = epoll,
                 ._socket_svc = socket_svc,
+                ._max_consecutive_read = max_consecutive_read,
+
                 ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
                 ._task_queue = try .initCapacity(gpa, max_num_sockets * 2 + 1),
                 ._yield_queue = try .initCapacity(gpa, max_num_sockets),
+
                 ._state_alloc = try StateAlloc.init(gpa, max_num_sockets + 1),
                 ._all_states = undefined,
                 ._eventfd_state = undefined,
@@ -238,11 +243,8 @@ pub fn EpollCore(
         }
 
         fn handleTaskEventFD(self: *Self) HandleTaskStatus {
-            // TODO check num_handled_actions
-
             const null_action = self._action_queue.popFront();
             const action = if (null_action) |x| x else {
-                // TODO clear num handled actions
                 // TODO drain eventfd
                 return .Next;
             };
@@ -275,9 +277,6 @@ pub fn EpollCore(
             // add to epoll
             EpollFuncs.epollAdd(self._epoll, new_conn_fd, conn_state);
             self.addReadTask(conn_state);
-
-            const state = self._eventfd_state;
-            state.num_handled_actions += 1;
         }
 
         fn handleReadSocket(self: *Self, state: *SocketState) HandleTaskStatus {
@@ -292,7 +291,13 @@ pub fn EpollCore(
             return self.doReadFromSocket(state);
         }
 
-        fn doHandleFullReadData(_: *Self, state: *SocketState) HandleTaskStatus {
+        fn doReadReturnNext(self: *Self, state: *SocketState) HandleTaskStatus {
+            self.addWriteTask(state, true);
+            state.num_consecutive_read = 0;
+            return .Next;
+        }
+
+        fn doHandleFullReadData(self: *Self, state: *SocketState) HandleTaskStatus {
             std.debug.assert(state.getHandleBuf().len == state.read_size);
 
             var is_finished_action: bool = false;
@@ -307,8 +312,14 @@ pub fn EpollCore(
                 .Ok => |x| {
                     state.read_size = x.next_read_size;
                     state.handle_buf_len = 0;
-                    if (is_finished_action) {
-                        state.num_handled_actions += 1;
+                    if (!is_finished_action) {
+                        return .Continue;
+                    }
+
+                    state.num_consecutive_read += 1;
+                    if (state.num_consecutive_read >= self._max_consecutive_read) {
+                        self.addReadTask(state);
+                        return self.doReadReturnNext(state);
                     }
                     return .Continue;
                 },
@@ -344,8 +355,7 @@ pub fn EpollCore(
             const num_read = if (read_resp) |x| x else |err| {
                 switch (err) {
                     types.SocketError.EAGAIN => {
-                        self.addWriteTask(state, true);
-                        return .Next;
+                        return self.doReadReturnNext(state);
                     },
                     types.SocketError.ConnectionError => {
                         @panic("TODO");
@@ -641,7 +651,7 @@ const CoreTest = struct {
         EpollFuncs.init(),
         SocketFuncs.init(),
         CallbackFuncs.init(),
-        3,
+        5,
     );
 
     const Task = CoreType.Task;
@@ -669,6 +679,7 @@ const CoreTest = struct {
             &self.socket_svc,
             11,
             3,
+            2,
         );
         errdefer self.core.deinit();
 
@@ -705,6 +716,8 @@ const CoreTest = struct {
         defer self.checkInvariant();
 
         const status = self.core.handleTask(task);
+
+        // check on next
         if (status == .Next) {
             self.checkOnNextInv(task.state);
         }
@@ -780,6 +793,12 @@ const CoreTest = struct {
             if (write_data.items.len < write_data.capacity) {
                 std.debug.assert(state.is_writing);
             }
+        }
+
+        std.debug.assert(state.num_consecutive_read == 0);
+
+        if (state.getTmpBuf().len > 0) {
+            std.debug.assert(state.is_reading);
         }
     }
 
@@ -868,7 +887,6 @@ test "handle epoll event" {
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task1));
     try expectEqual(1, s.core._task_queue.len);
     try expectEqual(0, s.core._action_queue.len);
-    try expectEqual(1, s.core._eventfd_state.num_handled_actions);
     // check socket map
     try expectEqual(1, s.epoll.socket_map.count());
     try expectEqual(true, s.epoll.socket_map.contains(socket_fd1));
@@ -901,7 +919,7 @@ test "handle epoll event" {
     try expectEqual(0, s.core._task_queue.len);
     try expectEqualSlices(u8, &.{31}, task2.state.callbacks.read_data.items);
     try expectEqual(3, task2.state.read_size); // new read size
-    try expectEqual(0, task2.state.num_handled_actions);
+    try expectEqual(0, task2.state.num_consecutive_read);
 
     // move from tmp buf to handle buf again
     try expectEqual(HandleTaskStatus.Continue, s.handleTask(task2));
@@ -960,7 +978,6 @@ test "fully read action, with write queue" {
         &.{ 31, 32, 33, 34, 35, 36 },
         read_task1.state.callbacks.read_data.items,
     );
-    try expectEqual(1, read_task1.state.num_handled_actions);
     try expectEqual(1, s.core._task_queue.len);
     try expectEqual(2, read_task1.state.write_queue.count());
 
@@ -1025,4 +1042,24 @@ test "fully read action, with write buffer full" {
         &.{46},
         write_data1.items,
     );
+}
+
+test "fully read multi actions, reach max consecutive read" {
+    const s = try CoreTest.init();
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // read util next
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 } ** 3;
+    s.setReadData(socket_fd1, &read_data);
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    try expectEqual(2, s.core._task_queue.len);
+    try expectEqual(.Write, s.core._task_queue.at(0).task_type);
+    try expectEqual(.Read, s.core._task_queue.at(1).task_type);
+    try expectEqual(4, read_task1.state.write_queue.count());
+    try expectEqual(6, read_task1.state.getTmpBuf().len);
 }

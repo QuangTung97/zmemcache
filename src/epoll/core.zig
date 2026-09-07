@@ -192,8 +192,10 @@ pub fn EpollCore(
         fn epollWait(self: *Self, buffer: []Event) []Event {
             std.debug.assert(self._task_queue.len == 0);
 
-            // TODO handle with wait
-            return EpollFuncs.epollWait(self._epoll, buffer, false);
+            // yield queue not empty => does not wait
+            const with_wait = self._yield_queue.len == 0;
+
+            return EpollFuncs.epollWait(self._epoll, buffer, with_wait);
         }
 
         fn handleEpollEvent(self: *Self, event: Event) void {
@@ -232,6 +234,8 @@ pub fn EpollCore(
         }
 
         fn addReadTask(self: *Self, state: *SocketState) void {
+            std.debug.assert(!state.reading_yielded);
+
             if (state.is_reading) {
                 return;
             }
@@ -245,12 +249,27 @@ pub fn EpollCore(
         }
 
         fn yieldReadTask(self: *Self, state: *SocketState) void {
+            std.debug.assert(!state.is_reading);
+            std.debug.assert(!state.reading_yielded);
+
             const task = Task{
                 .task_type = .Read,
                 .state = state,
             };
             state.reading_yielded = true;
             self._yield_queue.pushBackBounded(task) catch unreachable;
+        }
+
+        fn popYieldQueue(self: *Self) ?Task {
+            const null_task = self._yield_queue.popFront();
+            const task = if (null_task) |x| x else {
+                return null;
+            };
+
+            std.debug.assert(task.task_type == .Read);
+            task.state.reading_yielded = false;
+
+            return task;
         }
 
         const AddWriteFrom = enum { EpollOut, AfterRead };
@@ -434,6 +453,10 @@ pub fn EpollCore(
         }
 
         fn handleWriteSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            if (state.write_queue.count() == 0) {
+                return .Next;
+            }
+
             const result = SocketFuncs.write(
                 self._socket_svc,
                 state.socket_fd,
@@ -548,16 +571,16 @@ const FakeSocketSvc = struct {
     const WriteData = std.ArrayList(u8);
     const WriteDataMap = std.AutoHashMap(u64, WriteData);
 
-    const write_buffer_len = 6;
-
     read_map: ReadMap,
     write_data_map: WriteDataMap,
+    write_buffer_len: usize,
 
-    fn init() Self {
+    fn init(write_len: usize) Self {
         const gpa = std.testing.allocator;
         return .{
             .read_map = ReadMap.init(gpa),
             .write_data_map = WriteDataMap.init(gpa),
+            .write_buffer_len = write_len,
         };
     }
 
@@ -586,6 +609,8 @@ const FakeSocketSvc = struct {
     }
 
     pub fn write(self: *Self, fd: u64, write_queue: *types.WriteQueue) types.SocketError!usize {
+        std.debug.assert(write_queue.count() > 0);
+
         var total_written: usize = 0;
 
         const write_data = self.getWriteDataList(fd);
@@ -617,7 +642,10 @@ const FakeSocketSvc = struct {
 
         self.write_data_map.put(
             fd,
-            WriteData.initCapacity(gpa, write_buffer_len) catch unreachable,
+            WriteData.initCapacity(
+                gpa,
+                self.write_buffer_len,
+            ) catch unreachable,
         ) catch unreachable;
 
         const entry = self.write_data_map.getEntry(fd).?;
@@ -740,8 +768,9 @@ const CoreTest = struct {
 
     const Config = struct {
         write_queue_capacity: usize = 5,
-        max_consecutive_read: usize = 10,
-        max_total_read_before_yield: usize = 20,
+        max_consecutive_read: usize = 1000,
+        max_total_read_before_yield: usize = 1000,
+        socket_send_buffer_size: usize = 6,
     };
 
     fn init(config: Config) !*Self {
@@ -752,7 +781,7 @@ const CoreTest = struct {
 
         self.* = .{
             .epoll = FakeEpoll.init(gpa),
-            .socket_svc = FakeSocketSvc.init(),
+            .socket_svc = FakeSocketSvc.init(config.socket_send_buffer_size),
             .core = undefined,
         };
 
@@ -797,6 +826,16 @@ const CoreTest = struct {
     fn popTaskQueue(self: *Self) ?Task {
         defer self.checkInvariant();
         return self.core.popTaskQueue();
+    }
+
+    fn popYieldQueue(self: *Self) ?Task {
+        defer self.checkInvariant();
+        return self.core.popYieldQueue();
+    }
+
+    fn addReadTask(self: *Self, state: *SocketState) void {
+        defer self.checkInvariant();
+        self.core.addReadTask(state);
     }
 
     fn handleTask(self: *Self, task: Task) HandleTaskStatus {
@@ -1235,7 +1274,8 @@ test "write queue is full" {
 test "with yield queue, when reaching total max read" {
     const s = try CoreTest.init(.{
         .max_total_read_before_yield = 2,
-        .write_queue_capacity = 20,
+        .write_queue_capacity = 50,
+        .socket_send_buffer_size = 100,
     });
     defer s.deinit();
 
@@ -1257,4 +1297,43 @@ test "with yield queue, when reaching total max read" {
     try expectEqual(true, state1.reading_yielded);
     try expectEqual(false, state1.is_reading);
     try expectEqual(.Read, s.core._yield_queue.at(0).task_type);
+
+    // pop yield queue
+    const read_task2 = s.popYieldQueue().?;
+    try expectEqual(read_task1, read_task2);
+    try expectEqual(false, state1.reading_yielded);
+    try expectEqual(false, state1.is_reading);
+    try expectEqual(true, state1.is_writing);
+
+    // push to task queue
+    s.addReadTask(state1);
+    try expectEqual(false, state1.reading_yielded);
+    try expectEqual(true, state1.is_reading);
+    try expectEqual(true, state1.is_writing);
+
+    try expectEqual(2, s.core._task_queue.len);
+    try expectEqual(0, s.core._yield_queue.len);
+
+    // do write
+    const write_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(write_task1);
+    try expectEqual(0, state1.write_queue.count());
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(0, s.core._yield_queue.len);
+    try expectEqual(true, state1.is_reading);
+    try expectEqual(false, state1.is_writing);
+    try expectEqual(false, state1.socket_send_full);
+    const write_data1 = s.socket_svc.getWriteDataList(socket_fd1);
+    try expectEqual(12, write_data1.items.len);
+
+    // reset total num read
+    s.core._total_num_read = 0;
+
+    // handle read again
+    const read_task3 = s.popTaskQueue().?;
+    try expectEqual(read_task1, read_task3);
+    s.handleTaskUntilNext(read_task3);
+    try expectEqual(2, state1.write_queue.count());
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(0, s.core._yield_queue.len);
 }

@@ -101,6 +101,8 @@ pub fn EpollCore(
         _max_total_read_before_yield: usize,
 
         _action_queue: ActionQueue,
+        // TODO add mutex
+
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
 
@@ -189,7 +191,7 @@ pub fn EpollCore(
             _ = self._num_active_conns.fetchSub(1);
         }
 
-        fn epollWait(self: *Self, buffer: []Event) []Event {
+        pub fn epollWait(self: *Self, buffer: []Event) []Event {
             std.debug.assert(self._task_queue.len == 0);
 
             // yield queue not empty => does not wait
@@ -198,7 +200,7 @@ pub fn EpollCore(
             return EpollFuncs.epollWait(self._epoll, buffer, with_wait);
         }
 
-        fn handleEpollEvent(self: *Self, event: Event) void {
+        pub fn handleEpollEvent(self: *Self, event: Event) void {
             const data_ptr = EventFuncs.getDataPtr(event);
             const state: *SocketState = @ptrCast(@alignCast(data_ptr));
 
@@ -211,8 +213,33 @@ pub fn EpollCore(
             }
         }
 
-        fn addActionQueue(self: *Self, action: ActionType) void {
+        pub fn moveFromYieldQueueToTaskQueue(self: *Self) void {
+            while (self.popYieldQueue()) |task| {
+                self.addReadTask(task.state);
+            }
+        }
+
+        pub fn addActionQueue(self: *Self, action: ActionType) void {
+            // TODO add mutex
             self._action_queue.pushBackBounded(action) catch unreachable;
+        }
+
+        pub fn handleTaskQueue(self: *Self) void {
+            self._total_num_read = 0; // clear before loop
+
+            while (self.popTaskQueue()) |task| {
+                while (true) {
+                    const result = self.handleTask(task);
+                    switch (result) {
+                        .Continue => {
+                            continue;
+                        },
+                        .Next => {
+                            break;
+                        },
+                    }
+                }
+            }
         }
 
         fn popTaskQueue(self: *Self) ?Task {
@@ -313,6 +340,7 @@ pub fn EpollCore(
         }
 
         fn handleTaskEventFD(self: *Self) HandleTaskStatus {
+            // TODO add mutex
             const null_action = self._action_queue.popFront();
             const action = if (null_action) |x| x else {
                 // TODO drain eventfd
@@ -1336,4 +1364,42 @@ test "with yield queue, when reaching total max read" {
     try expectEqual(2, state1.write_queue.count());
     try expectEqual(1, s.core._task_queue.len);
     try expectEqual(0, s.core._yield_queue.len);
+}
+
+test "with yield queue, when reaching total max read, use public methods" {
+    const s = try CoreTest.init(.{
+        .max_total_read_before_yield = 2,
+        .write_queue_capacity = 50,
+        .socket_send_buffer_size = 100,
+    });
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // set read data
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 } ** 3;
+    s.setReadData(socket_fd1, &read_data);
+
+    // handle task queue
+    s.core.handleTaskQueue();
+    s.checkInvariant();
+
+    try expectEqual(0, s.core._task_queue.len);
+    try expectEqual(1, s.core._yield_queue.len);
+    const write_data1 = s.socket_svc.getWriteDataList(socket_fd1);
+    try expectEqual(12, write_data1.items.len);
+
+    s.core.moveFromYieldQueueToTaskQueue();
+    s.checkInvariant();
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(0, s.core._yield_queue.len);
+
+    // handle task queue again
+    s.core.handleTaskQueue();
+    s.checkInvariant();
+
+    try expectEqual(0, s.core._task_queue.len);
+    try expectEqual(0, s.core._yield_queue.len);
+    try expectEqual(18, write_data1.items.len);
 }

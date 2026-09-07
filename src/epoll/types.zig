@@ -48,12 +48,15 @@ pub fn SocketFuncs(T: type, FD: type) type {
         // write always returns size > 0
         write: fn (self: *T, socket: FD, write_queue: *WriteQueue) SocketError!usize,
 
+        close: fn (self: *T, socket: FD) void,
+
         const Self = @This();
 
         pub fn init() Self {
             return .{
                 .read = T.read,
                 .write = T.write,
+                .close = T.close,
             };
         }
     };

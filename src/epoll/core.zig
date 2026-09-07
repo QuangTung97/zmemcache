@@ -613,7 +613,8 @@ pub fn EpollCore(
             state.all_state_list.remove();
             self._state_alloc.destroy(state);
 
-            // TODO close socket
+            SocketFuncs.close(self._socket_svc, state.socket_fd);
+
             _ = self._num_active_conns.fetchSub(1);
         }
     };
@@ -775,6 +776,20 @@ const FakeSocketSvc = struct {
 
         const entry = self.write_data_map.getEntry(fd).?;
         return entry.value_ptr;
+    }
+
+    pub fn close(self: *Self, fd: u64) void {
+        const gpa = std.testing.allocator;
+
+        _ = self.read_map.remove(fd);
+
+        const write_data = self.write_data_map.getEntry(fd);
+        if (write_data) |entry| {
+            entry.value_ptr.deinit(gpa);
+            _ = self.write_data_map.remove(fd);
+        }
+
+        _ = self.is_closed_map.remove(fd);
     }
 };
 
@@ -1523,9 +1538,13 @@ test "socket is closed, when reading" {
 
     const read_task1 = s.popTaskQueue().?;
     s.handleTaskUntilNext(read_task1);
+
     try expectEqual(0, s.core._task_queue.len);
     try expectEqual(true, s.core._all_states.isEmpty()); // all states removed
     try expectEqual(1, s.core._state_alloc.getNumInUse());
+
+    try expectEqual(0, s.socket_svc.read_map.count());
+    try expectEqual(0, s.socket_svc.is_closed_map.count());
 }
 
 test "read util EAGAIN, then close when writing" {

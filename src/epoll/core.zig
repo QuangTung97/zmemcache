@@ -71,11 +71,6 @@ pub fn EpollCore(
         fn fromList(entry: *zutil.ListHead) *Self {
             return @fieldParentPtr("all_state_list", entry);
         }
-
-        fn destroy(self: *Self) void {
-            CallbackFuncs.onDeinit(&self.callbacks);
-            self.all_state_list.remove();
-        }
     };
 
     return struct {
@@ -143,8 +138,7 @@ pub fn EpollCore(
             var state_it = self._all_states.iterate();
             while (state_it.next()) |e| {
                 const state = SocketState.fromList(e);
-                state.destroy();
-                _ = self._num_active_conns.fetchSub(1);
+                self.destroyState(state);
             }
 
             std.debug.assert(self._all_states.isEmpty());
@@ -155,6 +149,12 @@ pub fn EpollCore(
             self._action_queue.deinit(gpa);
 
             gpa.destroy(self);
+        }
+
+        pub fn destroyState(self: *Self, state: *SocketState) void {
+            CallbackFuncs.onDeinit(&state.callbacks);
+            state.all_state_list.remove();
+            _ = self._num_active_conns.fetchSub(1);
         }
 
         fn epollWait(self: *Self, buffer: []Event) []Event {
@@ -366,25 +366,7 @@ pub fn EpollCore(
             );
 
             if (result) |total_written| {
-                var num_bytes = total_written;
-                while (num_bytes > 0) {
-                    const null_data_ptr = state.write_queue.peakWriteFrame();
-                    const data_ptr = if (null_data_ptr) |x| x else {
-                        break;
-                    };
-                    const data_len = data_ptr.len;
-
-                    if (num_bytes >= data_len) {
-                        _ = state.write_queue.popWriteFrame();
-                        CallbackFuncs.popWriteFrame(&state.callbacks);
-                        num_bytes -= data_len;
-                        continue;
-                    }
-
-                    data_ptr.* = data_ptr.*[num_bytes..]; // sub-slice the remaining
-                    break;
-                }
-                return .Continue;
+                return self.writeSocketPopWriteFrames(state, total_written);
             } else |err| {
                 switch (err) {
                     types.SocketError.EAGAIN => {
@@ -395,6 +377,28 @@ pub fn EpollCore(
                     },
                 }
             }
+        }
+
+        fn writeSocketPopWriteFrames(_: *Self, state: *SocketState, total_written: usize) HandleTaskStatus {
+            var num_bytes = total_written;
+            while (num_bytes > 0) {
+                const null_data_ptr = state.write_queue.peakWriteFrame();
+                const data_ptr = if (null_data_ptr) |x| x else {
+                    break;
+                };
+                const data_len = data_ptr.len;
+
+                if (num_bytes >= data_len) {
+                    _ = state.write_queue.popWriteFrame();
+                    CallbackFuncs.popWriteFrame(&state.callbacks);
+                    num_bytes -= data_len;
+                    continue;
+                }
+
+                data_ptr.* = data_ptr.*[num_bytes..]; // sub-slice the remaining
+                break;
+            }
+            return .Continue;
         }
     };
 }

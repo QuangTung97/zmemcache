@@ -61,7 +61,8 @@ pub const EpollService = struct {
 
     pub fn epollAdd(self: *Self, client_fd: FD, data_ptr: *anyopaque) void {
         var event = Event{
-            .events = linux.EPOLL.IN | linux.EPOLL.OUT,
+            // with edge trigger
+            .events = linux.EPOLL.IN | linux.EPOLL.OUT | linux.EPOLL.ET,
             .data = .{
                 .ptr = @intFromPtr(data_ptr),
             },

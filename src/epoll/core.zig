@@ -362,29 +362,25 @@ pub fn EpollCore(
                 &state.write_queue,
             );
 
-            if (result) |total_written_num| {
-                var total_written = total_written_num;
-
-                while (true) {
+            if (result) |total_written| {
+                var num_bytes = total_written;
+                while (num_bytes > 0) {
                     const null_data_ptr = state.write_queue.peakWriteFrame();
                     const data_ptr = if (null_data_ptr) |x| x else {
                         break;
                     };
                     const data_len = data_ptr.len;
 
-                    if (total_written >= data_len) {
+                    if (num_bytes >= data_len) {
                         _ = state.write_queue.popWriteFrame();
                         CallbackFuncs.popWriteFrame(&state.callbacks);
-                        total_written -= data_len;
+                        num_bytes -= data_len;
                         continue;
                     }
 
-                    // TODO handle sub slice data
-                    total_written = 0;
+                    data_ptr.* = data_ptr.*[num_bytes..]; // sub-slice the remaining
                     break;
                 }
-
-                std.debug.assert(total_written == 0);
                 return .Continue;
             } else |err| {
                 switch (err) {
@@ -393,7 +389,7 @@ pub fn EpollCore(
                     },
                     types.SocketError.ConnectionError => {
                         @panic("TODO");
-                    }
+                    },
                 }
             }
         }
@@ -769,7 +765,10 @@ const CoreTest = struct {
         }
 
         if (state.write_queue.count() > 0) {
-            std.debug.assert(state.is_writing);
+            const write_data = self.socket_svc.getWriteDataList(state.socket_fd);
+            if (write_data.items.len < write_data.capacity) {
+                std.debug.assert(state.is_writing);
+            }
         }
     }
 
@@ -789,6 +788,14 @@ const CoreTest = struct {
         return .{
             .epoll_in = true,
             .epoll_out = false,
+            .data_ptr = self.epoll.socket_map.get(fd).?,
+        };
+    }
+
+    fn newEpollWrite(self: *Self, fd: u64) FakeEvent {
+        return .{
+            .epoll_in = false,
+            .epoll_out = true,
             .data_ptr = self.epoll.socket_map.get(fd).?,
         };
     }
@@ -975,7 +982,8 @@ test "fully read action, with write buffer full" {
     s.handleTaskUntilNext(read_task1);
 
     // add single byte to write buffer
-    try s.socket_svc.getWriteDataList(socket_fd1).appendBounded(91);
+    const write_data1 = s.socket_svc.getWriteDataList(socket_fd1);
+    try write_data1.appendBounded(91);
 
     // pop write task & handle write partially
     const write_task1 = s.popTaskQueue().?;
@@ -983,9 +991,27 @@ test "fully read action, with write buffer full" {
     try expectEqualSlices(
         u8,
         &.{ 91, 41, 42, 43, 44, 45 },
-        s.socket_svc.write_data_map.get(socket_fd1).?.items,
+        write_data1.items,
     );
 
     // write with EAGAIN
     try expectEqual(.Next, s.handleTask(write_task1));
+    try expectEqual(0, s.core._task_queue.len);
+
+    // clear write data
+    write_data1.clearRetainingCapacity();
+
+    // handle EPOLL OUT
+    s.handleEpollEvent(s.newEpollWrite(socket_fd1));
+    try expectEqual(1, s.core._task_queue.len);
+
+    // pop write task & handle write again
+    const write_task2 = s.popTaskQueue().?;
+    try expectEqual(write_task1, write_task2);
+    try expectEqual(.Continue, s.handleTask(write_task2));
+    try expectEqualSlices(
+        u8,
+        &.{46},
+        write_data1.items,
+    );
 }

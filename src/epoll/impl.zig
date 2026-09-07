@@ -5,9 +5,25 @@ const linux = std.os.linux;
 
 pub const FD = linux.fd_t;
 pub const Event = linux.epoll_event;
+
+pub const EventFuncs = types.EventFuncs(EventService, Event);
 pub const EpollFuncs = types.EpollFuncs(EpollService, Event, FD);
 
-const EpollService = struct {
+pub const EventService = struct {
+    pub fn hasEpollIn(e: Event) bool {
+        return e.events | linux.EPOLL.IN != 0;
+    }
+
+    pub fn hasEpollOut(e: Event) bool {
+        return e.events | linux.EPOLL.OUT != 0;
+    }
+
+    pub fn getDataPtr(e: Event) *anyopaque {
+        return @ptrFromInt(e.data.ptr);
+    }
+};
+
+pub const EpollService = struct {
     const Self = @This();
 
     _epoll_fd: FD,
@@ -73,6 +89,13 @@ const EpollService = struct {
         }
     }
 };
+
+test "event svc" {
+    const funcs = EventFuncs.init();
+    _ = funcs;
+
+    std.testing.refAllDecls(EventService);
+}
 
 test "epoll" {
     var epoll = EpollService.init();

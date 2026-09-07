@@ -19,11 +19,12 @@ fn assertImply(a: bool, b: bool) void {
 pub fn EpollCore(
     FD: type,
     Event: type,
+    EventSvc: type,
     EpollType: type,
     EventFdType: type,
     SocketSvc: type,
     CallbackType: type,
-    EventFuncs: types.EventFuncs(Event),
+    EventFuncs: types.EventFuncs(EventSvc, Event),
     EpollFuncs: types.EpollFuncs(EpollType, Event, FD),
     EventFdFuncs: types.EventFdFuncs(EventFdType, FD),
     SocketFuncs: types.SocketFuncs(SocketSvc, FD),
@@ -648,19 +649,19 @@ const FakeEvent = struct {
     epoll_in: bool,
     epoll_out: bool,
     data_ptr: *anyopaque,
+};
 
-    const Self = @This();
-
-    pub fn hasEpollIn(self: Self) bool {
-        return self.epoll_in;
+const FakeEventSvc = struct {
+    pub fn hasEpollIn(e: FakeEvent) bool {
+        return e.epoll_in;
     }
 
-    pub fn hasEpollOut(self: Self) bool {
-        return self.epoll_out;
+    pub fn hasEpollOut(e: FakeEvent) bool {
+        return e.epoll_out;
     }
 
-    pub fn getDataPtr(self: Self) *anyopaque {
-        return self.data_ptr;
+    pub fn getDataPtr(e: FakeEvent) *anyopaque {
+        return e.data_ptr;
     }
 };
 
@@ -932,7 +933,7 @@ const FakeCallbacks = struct {
 const CoreTest = struct {
     const Self = @This();
 
-    const EventFuncs = types.EventFuncs(FakeEvent);
+    const EventFuncs = types.EventFuncs(FakeEventSvc, FakeEvent);
     const EpollFuncs = types.EpollFuncs(FakeEpoll, FakeEvent, u64);
     const EventFdFuncs = types.EventFdFuncs(FakeEventFd, u64);
     const SocketFuncs = types.SocketFuncs(FakeSocketSvc, u64);
@@ -941,6 +942,7 @@ const CoreTest = struct {
     const CoreType = EpollCore(
         u64,
         FakeEvent,
+        FakeEventSvc,
         FakeEpoll,
         FakeEventFd,
         FakeSocketSvc,

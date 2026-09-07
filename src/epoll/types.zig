@@ -20,7 +20,7 @@ pub fn EpollFuncs(T: type, Event: type, FD: type) type {
     };
 }
 
-pub fn EventFuncs(Event: type) type {
+pub fn EventFuncs(T: type, Event: type) type {
     return struct {
         hasEpollIn: fn (self: Event) bool,
         hasEpollOut: fn (self: Event) bool,
@@ -30,9 +30,9 @@ pub fn EventFuncs(Event: type) type {
 
         pub fn init() Self {
             return .{
-                .hasEpollIn = Event.hasEpollIn,
-                .hasEpollOut = Event.hasEpollOut,
-                .getDataPtr = Event.getDataPtr,
+                .hasEpollIn = T.hasEpollIn,
+                .hasEpollOut = T.hasEpollOut,
+                .getDataPtr = T.getDataPtr,
             };
         }
     };

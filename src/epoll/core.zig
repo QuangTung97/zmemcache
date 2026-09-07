@@ -219,9 +219,19 @@ pub fn EpollCore(
             }
         }
 
-        pub fn addActionQueue(self: *Self, action: ActionType) void {
+        pub fn addNewSocket(self: *Self, socket_fd: FD) void {
+            _ = self._num_active_conns.fetchAdd(1);
+            self.addActionQueue(.{
+                .NewConn = .{
+                    .fd = socket_fd,
+                },
+            });
+        }
+
+        fn addActionQueue(self: *Self, action: ActionType) void {
             // TODO add mutex
             self._action_queue.pushBackBounded(action) catch unreachable;
+            // TODO inc eventfd
         }
 
         pub fn handleTaskQueue(self: *Self) void {
@@ -372,7 +382,6 @@ pub fn EpollCore(
 
             // add to all states
             self._all_states.pushBack(&conn_state.all_state_list);
-            _ = self._num_active_conns.fetchAdd(1); // TODO remove
 
             // add to epoll
             EpollFuncs.epollAdd(self._epoll, new_conn_fd, conn_state);
@@ -845,10 +854,8 @@ const CoreTest = struct {
         self.core.handleEpollEvent(event);
     }
 
-    fn addActionNewConn(self: *Self, fd: u64) void {
-        self.core.addActionQueue(.{
-            .NewConn = .{ .fd = fd },
-        });
+    fn addNewSocket(self: *Self, fd: u64) void {
+        self.core.addNewSocket(fd);
     }
 
     fn popTaskQueue(self: *Self) ?Task {
@@ -944,7 +951,7 @@ const CoreTest = struct {
             assertImply(state.reading_yielded, !state.is_reading);
         }
 
-        std.debug.assert(self.core._num_active_conns.load() == num_states);
+        std.debug.assert(self.core._num_active_conns.load() >= num_states);
 
         // --------------------------------
         // iterate yield queue
@@ -1011,7 +1018,7 @@ const CoreTest = struct {
         try expectEqual(0, self.core._task_queue.len);
 
         self.handleEpollEvent(self.newEpollEventFD());
-        self.addActionNewConn(fd);
+        self.addNewSocket(fd);
 
         // pop and handle task
         const task = self.popTaskQueue().?;
@@ -1051,7 +1058,7 @@ test "handle epoll event" {
 
     // new socket
     const socket_fd1: u64 = 21;
-    s.addActionNewConn(socket_fd1);
+    s.addNewSocket(socket_fd1);
     try expectEqual(1, s.core._action_queue.len);
 
     // pop and handle task

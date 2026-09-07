@@ -380,13 +380,21 @@ pub fn EpollCore(
                     }
 
                     // TODO handle sub slice data
+                    total_written = 0;
                     break;
                 }
 
                 std.debug.assert(total_written == 0);
                 return .Continue;
-            } else |_| {
-                @panic("TODO");
+            } else |err| {
+                switch (err) {
+                    types.SocketError.EAGAIN => {
+                        return .Next;
+                    },
+                    types.SocketError.ConnectionError => {
+                        @panic("TODO");
+                    }
+                }
             }
         }
     };
@@ -495,31 +503,42 @@ const FakeSocketSvc = struct {
     }
 
     pub fn write(self: *Self, fd: u64, write_queue: *types.WriteQueue) types.SocketError!usize {
-        const gpa = std.testing.allocator;
-
-        const null_entry = self.write_data_map.getEntry(fd);
-
-        var write_data: *WriteData = undefined;
-        if (null_entry) |x| {
-            write_data = x.value_ptr;
-        } else {
-            self.write_data_map.put(
-                fd,
-                WriteData.initCapacity(gpa, write_buffer_len) catch unreachable,
-            ) catch unreachable;
-            const entry = self.write_data_map.getEntry(fd).?;
-            write_data = entry.value_ptr;
-        }
-
         var total_written: usize = 0;
+
+        const write_data = self.getWriteDataList(fd);
         var iter = write_queue.iterator();
         while (iter.next()) |data| {
-            // TODO handle partial write
-            write_data.appendSliceBounded(data) catch unreachable;
-            total_written += data.len;
+            const remain = write_data.capacity - write_data.items.len;
+            if (remain == 0) {
+                break;
+            }
+            const num = @min(data.len, remain);
+            write_data.appendSliceBounded(data[0..num]) catch unreachable;
+            total_written += num;
+        }
+
+        if (total_written == 0) {
+            return types.SocketError.EAGAIN;
         }
 
         return total_written;
+    }
+
+    pub fn getWriteDataList(self: *Self, fd: u64) *WriteData {
+        const gpa = std.testing.allocator;
+
+        const null_entry = self.write_data_map.getEntry(fd);
+        if (null_entry) |x| {
+            return x.value_ptr;
+        }
+
+        self.write_data_map.put(
+            fd,
+            WriteData.initCapacity(gpa, write_buffer_len) catch unreachable,
+        ) catch unreachable;
+
+        const entry = self.write_data_map.getEntry(fd).?;
+        return entry.value_ptr;
     }
 };
 
@@ -942,4 +961,31 @@ test "fully read action, with write queue" {
         &.{ 41, 42, 43, 44, 45, 46 },
         s.socket_svc.write_data_map.get(socket_fd1).?.items,
     );
+}
+
+test "fully read action, with write buffer full" {
+    const s = try CoreTest.init();
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    s.setReadData(socket_fd1, &.{ 31, 32, 33, 34, 35, 36 });
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    // add single byte to write buffer
+    try s.socket_svc.getWriteDataList(socket_fd1).appendBounded(91);
+
+    // pop write task & handle write partially
+    const write_task1 = s.popTaskQueue().?;
+    try expectEqual(.Continue, s.handleTask(write_task1));
+    try expectEqualSlices(
+        u8,
+        &.{ 91, 41, 42, 43, 44, 45 },
+        s.socket_svc.write_data_map.get(socket_fd1).?.items,
+    );
+
+    // write with EAGAIN
+    try expectEqual(.Next, s.handleTask(write_task1));
 }

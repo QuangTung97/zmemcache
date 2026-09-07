@@ -45,11 +45,15 @@ pub fn SocketFuncs(T: type, FD: type) type {
         // read always returns size > 0
         read: fn (self: *T, socket: FD, buffer: []u8) SocketError!usize,
 
+        // write always returns size > 0
+        write: fn (self: *T, socket: FD, write_queue: *WriteQueue) SocketError!usize,
+
         const Self = @This();
 
         pub fn init() Self {
             return .{
                 .read = T.read,
+                .write = T.write,
             };
         }
     };
@@ -84,11 +88,16 @@ pub const WriteQueue = struct {
     }
 
     pub fn addWriteFrame(self: *Self, data: []const u8) void {
+        std.debug.assert(data.len > 0);
         self._queue.pushBackBounded(data) catch unreachable;
     }
 
     pub fn popWriteFrame(self: *Self) ?[]const u8 {
         return self._queue.popFront();
+    }
+
+    pub fn peakWriteFrame(self: *Self) ?*[]const u8 {
+        return self._queue.frontPtr();
     }
 
     pub fn iterator(self: *Self) Queue.Iterator {
@@ -135,6 +144,7 @@ pub fn CallbackFuncs(T: type) type {
             write_queue: *WriteQueue,
             finished: *bool, // current action is finished
         ) OnReadResult,
+
         popWriteFrame: fn (self: *T) void,
 
         const Self = @This();
@@ -216,6 +226,7 @@ test "writer queue" {
     }
     try std.testing.expectEqual(2, total);
 
+    try std.testing.expectEqualStrings("data 01", w.peakWriteFrame().?.*);
     try std.testing.expectEqualStrings("data 01", w.popWriteFrame().?);
     try std.testing.expectEqualStrings("data 02", w.popWriteFrame().?);
 }

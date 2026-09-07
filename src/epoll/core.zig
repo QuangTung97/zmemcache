@@ -355,8 +355,39 @@ pub fn EpollCore(
             return .Continue;
         }
 
-        fn handleWriteSocket(_: *Self, _: *SocketState) HandleTaskStatus {
-            @panic("TODO");
+        fn handleWriteSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            const result = SocketFuncs.write(
+                self._socket_svc,
+                state.socket_fd,
+                &state.write_queue,
+            );
+
+            if (result) |total_written_num| {
+                var total_written = total_written_num;
+
+                while (true) {
+                    const null_data_ptr = state.write_queue.peakWriteFrame();
+                    const data_ptr = if (null_data_ptr) |x| x else {
+                        break;
+                    };
+                    const data_len = data_ptr.len;
+
+                    if (total_written >= data_len) {
+                        _ = state.write_queue.popWriteFrame();
+                        CallbackFuncs.popWriteFrame(&state.callbacks);
+                        total_written -= data_len;
+                        continue;
+                    }
+
+                    // TODO handle sub slice data
+                    break;
+                }
+
+                std.debug.assert(total_written == 0);
+                return .Continue;
+            } else |_| {
+                @panic("TODO");
+            }
         }
     };
 }
@@ -423,17 +454,33 @@ const FakeEpoll = struct {
 const FakeSocketSvc = struct {
     const Self = @This();
     const ReadMap = std.AutoHashMap(u64, []const u8);
+    const WriteData = std.ArrayList(u8);
+    const WriteDataMap = std.AutoHashMap(u64, WriteData);
+
+    const write_buffer_len = 6;
 
     read_map: ReadMap,
+    write_data_map: WriteDataMap,
 
-    fn init(gpa: Allocator) Self {
+    fn init() Self {
+        const gpa = std.testing.allocator;
         return .{
             .read_map = ReadMap.init(gpa),
+            .write_data_map = WriteDataMap.init(gpa),
         };
     }
 
     fn deinit(self: *Self) void {
+        const gpa = std.testing.allocator;
+
         self.read_map.deinit();
+
+        // destroy write map
+        var write_iter = self.write_data_map.iterator();
+        while (write_iter.next()) |e| {
+            e.value_ptr.deinit(gpa);
+        }
+        self.write_data_map.deinit();
     }
 
     pub fn read(self: *Self, fd: u64, buffer: []u8) types.SocketError!usize {
@@ -445,6 +492,34 @@ const FakeSocketSvc = struct {
         @memcpy(buffer[0..data.len], data);
         _ = self.read_map.remove(fd);
         return data.len;
+    }
+
+    pub fn write(self: *Self, fd: u64, write_queue: *types.WriteQueue) types.SocketError!usize {
+        const gpa = std.testing.allocator;
+
+        const null_entry = self.write_data_map.getEntry(fd);
+
+        var write_data: *WriteData = undefined;
+        if (null_entry) |x| {
+            write_data = x.value_ptr;
+        } else {
+            self.write_data_map.put(
+                fd,
+                WriteData.initCapacity(gpa, write_buffer_len) catch unreachable,
+            ) catch unreachable;
+            const entry = self.write_data_map.getEntry(fd).?;
+            write_data = entry.value_ptr;
+        }
+
+        var total_written: usize = 0;
+        var iter = write_queue.iterator();
+        while (iter.next()) |data| {
+            // TODO handle partial write
+            write_data.appendSliceBounded(data) catch unreachable;
+            total_written += data.len;
+        }
+
+        return total_written;
     }
 };
 
@@ -460,6 +535,8 @@ const FakeCallbacks = struct {
     read_data: ReadData,
     state: State,
     num_writes: usize,
+    _frame01: [3]u8 = undefined,
+    _frame02: [3]u8 = undefined,
 
     pub const init_read_size: usize = 1;
 
@@ -498,18 +575,26 @@ const FakeCallbacks = struct {
                 self.state = .Step1;
                 finished.* = true;
 
-                const val1: u8 = @intCast(self.num_writes + 41);
+                const val0: u8 = @intCast(self.num_writes * 3 + 40);
                 self.num_writes += 2;
 
-                write_queue.addWriteFrame(&.{ val1, val1 + 1 });
-                write_queue.addWriteFrame(&.{ val1 + 2, val1 + 3 });
+                const data1 = [_]u8{ val0 + 1, val0 + 2, val0 + 3 };
+                @memcpy(&self._frame01, &data1);
+
+                const data2 = [_]u8{ val0 + 4, val0 + 5, val0 + 6 };
+                @memcpy(&self._frame02, &data2);
+
+                write_queue.addWriteFrame(self._frame01[0..3]);
+                write_queue.addWriteFrame(self._frame02[0..3]);
 
                 return .initOk(init_read_size);
             },
         }
     }
 
-    pub fn popWriteFrame(_: *Self) void {}
+    pub fn popWriteFrame(self: *Self) void {
+        self.num_writes -= 1;
+    }
 };
 
 // ===========================================================================
@@ -552,7 +637,7 @@ const CoreTest = struct {
 
         self.* = .{
             .epoll = FakeEpoll.init(gpa),
-            .socket_svc = FakeSocketSvc.init(gpa),
+            .socket_svc = FakeSocketSvc.init(),
             .core = undefined,
         };
 
@@ -852,4 +937,9 @@ test "fully read action, with write queue" {
     try expectEqual(false, write_task1.state.is_writing);
     // handle write
     try expectEqual(.Continue, s.handleTask(write_task1));
+    try expectEqualSlices(
+        u8,
+        &.{ 41, 42, 43, 44, 45, 46 },
+        s.socket_svc.write_data_map.get(socket_fd1).?.items,
+    );
 }

@@ -12,6 +12,10 @@ const HandleTaskStatus = enum {
     Next, // go to the next task
 };
 
+fn assertImply(a: bool, b: bool) void {
+    std.debug.assert(!a or b);
+}
+
 pub fn EpollCore(
     FD: type,
     Event: type,
@@ -36,6 +40,8 @@ pub fn EpollCore(
 
         is_reading: bool = false,
         is_writing: bool = false,
+        reading_yielded: bool = false,
+
         num_consecutive_read: usize = 0,
 
         client_closed: bool = false,
@@ -192,8 +198,14 @@ pub fn EpollCore(
                 return null;
             };
 
-            task.state.is_reading = false;
-            task.state.is_writing = false;
+            switch (task.task_type) {
+                .Read => {
+                    task.state.is_reading = false;
+                },
+                .Write => {
+                    task.state.is_writing = false;
+                },
+            }
 
             return task;
         }
@@ -322,6 +334,9 @@ pub fn EpollCore(
                         return self.doReadReturnNext(state);
                     }
                     return .Continue;
+                },
+                .WaitWriteQueue => {
+                    return .Next;
                 },
             }
         }
@@ -604,6 +619,10 @@ const FakeCallbacks = struct {
                 return .initOk(2);
             },
             .Step3 => {
+                if (!write_queue.allowNumItems(2)) {
+                    return .{ .WaitWriteQueue = .{} };
+                }
+
                 self.state = .Step1;
                 finished.* = true;
 
@@ -788,18 +807,16 @@ const CoreTest = struct {
             return;
         }
 
-        if (state.write_queue.count() > 0) {
+        {
             const write_data = self.socket_svc.getWriteDataList(state.socket_fd);
-            if (write_data.items.len < write_data.capacity) {
-                std.debug.assert(state.is_writing);
-            }
+            const pre_cond = state.write_queue.count() > 0 and write_data.items.len < write_data.capacity;
+            assertImply(pre_cond, state.is_writing);
         }
 
         std.debug.assert(state.num_consecutive_read == 0);
 
-        if (state.getTmpBuf().len > 0) {
-            std.debug.assert(state.is_reading);
-        }
+        assertImply(state.getTmpBuf().len > 0, state.is_reading);
+        assertImply(state.getHandleBuf().len == state.read_size, state.is_reading);
     }
 
     fn newEpollEventFD(self: *Self) FakeEvent {
@@ -1062,4 +1079,36 @@ test "fully read multi actions, reach max consecutive read" {
     try expectEqual(.Read, s.core._task_queue.at(1).task_type);
     try expectEqual(4, read_task1.state.write_queue.count());
     try expectEqual(6, read_task1.state.getTmpBuf().len);
+}
+
+test "write queue is full" {
+    const s = try CoreTest.init();
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // read util next
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 } ** 3;
+    s.setReadData(socket_fd1, &read_data);
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    try expectEqual(2, s.core._task_queue.len);
+    try expectEqual(.Write, s.core._task_queue.at(0).task_type);
+    try expectEqual(.Read, s.core._task_queue.at(1).task_type);
+
+    // fill up the write buffer
+    const write_data1 = s.socket_svc.getWriteDataList(socket_fd1);
+    try write_data1.appendNTimesBounded(99, 6);
+
+    // handle write task
+    const write_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(write_task1);
+    try expectEqual(1, s.core._task_queue.len);
+
+    // handle read task
+    const read_task2 = s.popTaskQueue().?;
+    try expectEqual(read_task1, read_task2);
+    s.handleTaskUntilNext(read_task2);
 }

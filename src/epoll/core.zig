@@ -41,13 +41,13 @@ pub fn EpollCore(
         is_reading: bool = false,
         is_writing: bool = false,
         reading_yielded: bool = false,
+
         write_queue_full: bool = false,
         socket_send_full: bool = false,
 
         num_consecutive_read: usize = 0,
 
-        client_closed: bool = false,
-        server_closed: bool = false,
+        is_closed: bool = false,
 
         tmp_buf: [buffer_size]u8 = undefined,
         tmp_buf_start: usize = 0,
@@ -78,6 +78,19 @@ pub fn EpollCore(
 
         fn fromList(entry: *zutil.ListHead) *Self {
             return @fieldParentPtr("all_state_list", entry);
+        }
+
+        fn isActive(self: *Self) bool {
+            if (self.is_reading) {
+                return true;
+            }
+            if (self.is_writing) {
+                return true;
+            }
+            if (self.reading_yielded) {
+                return true;
+            }
+            return false;
         }
     };
 
@@ -179,10 +192,15 @@ pub fn EpollCore(
             var state_it = self._all_states.iterate();
             while (state_it.next()) |e| {
                 const state = SocketState.fromList(e);
-                self.destroyState(state);
+
+                state.is_reading = false;
+                state.is_writing = false;
+                state.reading_yielded = false;
+                self.doDestroySocket(state);
             }
 
             std.debug.assert(self._all_states.isEmpty());
+            std.debug.assert(self._state_alloc.getNumInUse() == 1);
 
             self._state_alloc.deinit(gpa);
             self._yield_queue.deinit(gpa);
@@ -190,12 +208,6 @@ pub fn EpollCore(
             self._action_queue.deinit(gpa);
 
             gpa.destroy(self);
-        }
-
-        pub fn destroyState(self: *Self, state: *SocketState) void {
-            CallbackFuncs.onDeinit(&state.callbacks);
-            state.all_state_list.remove();
-            _ = self._num_active_conns.fetchSub(1);
         }
 
         pub fn epollWait(self: *Self, buffer: []Event) []Event {
@@ -374,9 +386,15 @@ pub fn EpollCore(
             if (task.state == self._eventfd_state) {
                 return self.handleTaskEventFD();
             }
+
+            const state = task.state;
+            if (state.is_closed) {
+                return self.doCloseSocket(state);
+            }
+
             return switch (task.task_type) {
-                .Read => self.handleReadSocket(task.state),
-                .Write => self.handleWriteSocket(task.state),
+                .Read => self.handleReadSocket(state),
+                .Write => self.handleWriteSocket(state),
             };
         }
 
@@ -420,6 +438,7 @@ pub fn EpollCore(
 
         fn handleReadSocket(self: *Self, state: *SocketState) HandleTaskStatus {
             std.debug.assert(state.read_size > 0);
+            std.debug.assert(!state.is_closed);
 
             if (self._total_num_read >= self._max_total_read_before_yield) {
                 self.yieldReadTask(state);
@@ -509,7 +528,7 @@ pub fn EpollCore(
                         return self.doReadReturnNext(state);
                     },
                     types.SocketError.ConnectionError => {
-                        @panic("TODO");
+                        return self.doCloseSocket(state);
                     },
                 }
             };
@@ -520,6 +539,8 @@ pub fn EpollCore(
         }
 
         fn handleWriteSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            std.debug.assert(!state.is_closed);
+
             if (state.write_queue.count() == 0) {
                 return .Next;
             }
@@ -539,7 +560,7 @@ pub fn EpollCore(
                         return .Next;
                     },
                     types.SocketError.ConnectionError => {
-                        @panic("TODO");
+                        return self.doCloseSocket(state);
                     },
                 }
             }
@@ -569,6 +590,31 @@ pub fn EpollCore(
                 }
             }
             return .Continue;
+        }
+
+        fn doCloseSocket(self: *Self, state: *SocketState) HandleTaskStatus {
+            state.is_closed = true;
+            self.doDestroySocket(state);
+            return .Next;
+        }
+
+        fn doDestroySocket(self: *Self, state: *SocketState) void {
+            if (state.isActive()) {
+                return;
+            }
+
+            // pop all write frames
+            while (state.write_queue.popWriteFrame()) |_| {
+                CallbackFuncs.popWriteFrame(&state.callbacks);
+            }
+
+            CallbackFuncs.onDeinit(&state.callbacks);
+
+            state.all_state_list.remove();
+            self._state_alloc.destroy(state);
+
+            // TODO close socket
+            _ = self._num_active_conns.fetchSub(1);
         }
     };
 }
@@ -637,10 +683,12 @@ const FakeSocketSvc = struct {
     const ReadMap = std.AutoHashMap(u64, []const u8);
     const WriteData = std.ArrayList(u8);
     const WriteDataMap = std.AutoHashMap(u64, WriteData);
+    const CloseMap = std.AutoHashMap(u64, struct {});
 
     read_map: ReadMap,
     write_data_map: WriteDataMap,
     write_buffer_len: usize,
+    is_closed_map: CloseMap,
 
     fn init(write_len: usize) Self {
         const gpa = std.testing.allocator;
@@ -648,13 +696,12 @@ const FakeSocketSvc = struct {
             .read_map = ReadMap.init(gpa),
             .write_data_map = WriteDataMap.init(gpa),
             .write_buffer_len = write_len,
+            .is_closed_map = CloseMap.init(gpa),
         };
     }
 
     fn deinit(self: *Self) void {
         const gpa = std.testing.allocator;
-
-        self.read_map.deinit();
 
         // destroy write map
         var write_iter = self.write_data_map.iterator();
@@ -662,9 +709,16 @@ const FakeSocketSvc = struct {
             e.value_ptr.deinit(gpa);
         }
         self.write_data_map.deinit();
+
+        self.is_closed_map.deinit();
+        self.read_map.deinit();
     }
 
     pub fn read(self: *Self, fd: u64, buffer: []u8) types.SocketError!usize {
+        if (self.is_closed_map.contains(fd)) {
+            return types.SocketError.ConnectionError;
+        }
+
         const null_bytes = self.read_map.get(fd);
         const data = if (null_bytes) |x| x else {
             return types.SocketError.EAGAIN;
@@ -677,6 +731,10 @@ const FakeSocketSvc = struct {
 
     pub fn write(self: *Self, fd: u64, write_queue: *types.WriteQueue) types.SocketError!usize {
         std.debug.assert(write_queue.count() > 0);
+
+        if (self.is_closed_map.contains(fd)) {
+            return types.SocketError.ConnectionError;
+        }
 
         var total_written: usize = 0;
 
@@ -834,10 +892,10 @@ const CoreTest = struct {
     core: *CoreType,
 
     const Config = struct {
-        write_queue_capacity: usize = 5,
+        write_queue_capacity: usize = 50,
         max_consecutive_read: usize = 1000,
         max_total_read_before_yield: usize = 1000,
-        socket_send_buffer_size: usize = 6,
+        socket_send_buffer_size: usize = 100,
     };
 
     fn init(config: Config) !*Self {
@@ -891,12 +949,10 @@ const CoreTest = struct {
     }
 
     fn popTaskQueue(self: *Self) ?Task {
-        defer self.checkInvariant();
         return self.core.popTaskQueue();
     }
 
     fn popYieldQueue(self: *Self) ?Task {
-        defer self.checkInvariant();
         return self.core.popYieldQueue();
     }
 
@@ -981,6 +1037,8 @@ const CoreTest = struct {
             assertImply(state.write_queue_full, !state.is_reading);
             assertImply(state.socket_send_full, !state.is_writing);
             assertImply(state.reading_yielded, !state.is_reading);
+
+            assertImply(state.is_closed, state.isActive());
         }
 
         std.debug.assert(self.core._num_active_conns.load() >= num_states);
@@ -993,6 +1051,7 @@ const CoreTest = struct {
             std.debug.assert(task.task_type == .Read);
             const state = task.state;
             std.debug.assert(state.reading_yielded);
+            std.debug.assert(self.core._all_states.containsSlow(&state.all_state_list));
         }
     }
 
@@ -1003,13 +1062,21 @@ const CoreTest = struct {
 
         {
             const write_data = self.socket_svc.getWriteDataList(state.socket_fd);
-            const pre_cond = state.write_queue.count() > 0 and write_data.items.len < write_data.capacity;
+
+            const pre_cond =
+                !state.is_closed and
+                state.write_queue.count() > 0 and
+                write_data.items.len < write_data.capacity;
+
             assertImply(pre_cond, state.is_writing);
         }
 
         std.debug.assert(state.num_consecutive_read == 0);
 
-        assertImply(state.getTmpBuf().len > 0, state.is_reading or state.reading_yielded);
+        assertImply(
+            !state.is_closed and state.getTmpBuf().len > 0,
+            state.is_reading or state.reading_yielded,
+        );
         assertImply(
             state.getHandleBuf().len == state.read_size,
             state.is_reading or state.write_queue_full,
@@ -1213,7 +1280,10 @@ test "fully read action, with write queue" {
 }
 
 test "fully read action, with write buffer full" {
-    const s = try CoreTest.init(.{});
+    const s = try CoreTest.init(.{
+        .write_queue_capacity = 5,
+        .socket_send_buffer_size = 6,
+    });
     defer s.deinit();
 
     const socket_fd1: u64 = 21;
@@ -1279,7 +1349,10 @@ test "fully read multi actions, reach max consecutive read" {
 }
 
 test "write queue is full" {
-    const s = try CoreTest.init(.{});
+    const s = try CoreTest.init(.{
+        .write_queue_capacity = 5,
+        .socket_send_buffer_size = 6,
+    });
     defer s.deinit();
 
     const socket_fd1: u64 = 21;
@@ -1341,8 +1414,6 @@ test "write queue is full" {
 test "with yield queue, when reaching total max read" {
     const s = try CoreTest.init(.{
         .max_total_read_before_yield = 2,
-        .write_queue_capacity = 50,
-        .socket_send_buffer_size = 100,
     });
     defer s.deinit();
 
@@ -1408,8 +1479,6 @@ test "with yield queue, when reaching total max read" {
 test "with yield queue, when reaching total max read, use public methods" {
     const s = try CoreTest.init(.{
         .max_total_read_before_yield = 2,
-        .write_queue_capacity = 50,
-        .socket_send_buffer_size = 100,
     });
     defer s.deinit();
 
@@ -1441,4 +1510,159 @@ test "with yield queue, when reaching total max read, use public methods" {
     try expectEqual(0, s.core._task_queue.len);
     try expectEqual(0, s.core._yield_queue.len);
     try expectEqual(18, write_data1.items.len);
+}
+
+test "socket is closed, when reading" {
+    const s = try CoreTest.init(.{});
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    try s.socket_svc.is_closed_map.put(socket_fd1, .{});
+
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+    try expectEqual(0, s.core._task_queue.len);
+    try expectEqual(true, s.core._all_states.isEmpty()); // all states removed
+    try expectEqual(1, s.core._state_alloc.getNumInUse());
+}
+
+test "read util EAGAIN, then close when writing" {
+    const s = try CoreTest.init(.{});
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // set read data
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 } ** 2;
+    s.setReadData(socket_fd1, &read_data);
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    const state1 = read_task1.state;
+
+    // close socket
+    try s.socket_svc.is_closed_map.put(socket_fd1, .{});
+
+    // with EPOLLIN
+    s.handleEpollEvent(s.newEpollRead(socket_fd1));
+    try expectEqual(2, s.core._task_queue.len);
+
+    // handle write
+    const write_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(write_task1);
+
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(true, state1.is_closed);
+    try expectEqual(true, s.core._all_states.containsSlow(&state1.all_state_list));
+
+    // handle last read
+    const read_task2 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task2);
+
+    try expectEqual(0, s.core._task_queue.len);
+    try expectEqual(true, state1.is_closed);
+    try expectEqual(0, state1.write_queue.count());
+    try expectEqual(false, s.core._all_states.containsSlow(&state1.all_state_list));
+}
+
+test "close when reading, with pending writing task" {
+    const s = try CoreTest.init(.{
+        .socket_send_buffer_size = 6,
+    });
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // set read data
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 };
+    s.setReadData(socket_fd1, &read_data);
+
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    // fill send buffer
+    const write_data1 = s.socket_svc.getWriteDataList(socket_fd1);
+    try write_data1.appendNTimesBounded(99, 6);
+
+    // handle write
+    const write_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(write_task1);
+    const state1 = write_task1.state;
+    try expectEqual(2, state1.write_queue.count());
+    try expectEqual(0, s.core._task_queue.len);
+
+    // handle EPOLLIN and EPOLLOUT
+    s.handleEpollEvent(s.newEpollRead(socket_fd1));
+    s.handleEpollEvent(s.newEpollWrite(socket_fd1));
+    try expectEqual(2, s.core._task_queue.len);
+
+    // close socket
+    try s.socket_svc.is_closed_map.put(socket_fd1, .{});
+
+    // handle read
+    const read_task2 = s.popTaskQueue().?;
+    try expectEqual(read_task1, read_task2);
+    s.handleTaskUntilNext(read_task2);
+    try expectEqual(true, state1.is_closed);
+    try expectEqual(2, state1.write_queue.count());
+    try expectEqual(true, s.core._all_states.containsSlow(&state1.all_state_list));
+
+    // handle final write
+    const write_task2 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(write_task2);
+    try expectEqual(true, state1.is_closed);
+    try expectEqual(0, state1.write_queue.count());
+    try expectEqual(false, s.core._all_states.containsSlow(&state1.all_state_list));
+}
+
+test "close when writing, with yielded read" {
+    const s = try CoreTest.init(.{
+        .max_total_read_before_yield = 1,
+    });
+    defer s.deinit();
+
+    const socket_fd1: u64 = 21;
+    try s.addSocketFD(socket_fd1);
+
+    // set read data
+    const read_data = [_]u8{ 31, 32, 33, 34, 35, 36 } ** 2;
+    s.setReadData(socket_fd1, &read_data);
+
+    const read_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task1);
+
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(1, s.core._yield_queue.len);
+
+    // close socket
+    try s.socket_svc.is_closed_map.put(socket_fd1, .{});
+
+    // handle write
+    const write_task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(write_task1);
+
+    const state1 = write_task1.state;
+    try expectEqual(2, state1.write_queue.count());
+    try expectEqual(true, s.core._all_states.containsSlow(&state1.all_state_list));
+    try expectEqual(2, s.core._state_alloc.getNumInUse());
+
+    try expectEqual(0, s.core._task_queue.len);
+    try expectEqual(1, s.core._yield_queue.len);
+
+    // move yield to task queue
+    s.core.moveFromYieldQueueToTaskQueue();
+    try expectEqual(1, s.core._task_queue.len);
+    try expectEqual(0, s.core._yield_queue.len);
+
+    // handle last task
+    const read_task2 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(read_task2);
+    try expectEqual(0, state1.write_queue.count());
+    try expectEqual(0, state1.callbacks.num_writes);
+    try expectEqual(false, s.core._all_states.containsSlow(&state1.all_state_list));
+    try expectEqual(1, s.core._state_alloc.getNumInUse());
 }

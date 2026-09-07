@@ -200,6 +200,10 @@ pub fn StackAllocator(T: type) type {
             const index = item_ptr - self._all_items.ptr;
             self._free_indices.appendBounded(index) catch unreachable;
         }
+
+        pub fn getNumInUse(self: *const Self) usize {
+            return self._all_items.len - self._free_indices.items.len;
+        }
     };
 }
 

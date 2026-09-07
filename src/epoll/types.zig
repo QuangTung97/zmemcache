@@ -83,7 +83,7 @@ pub fn ActionEntry(FD: type) type {
         NewConn: struct {
             fd: FD,
         },
-        Shutdown: struct {}, // TODO use
+        Shutdown: struct {},
     };
 }
 

@@ -1741,7 +1741,7 @@ test "close when writing, with yielded read" {
     try expectEqual(1, s.core._state_alloc.getNumInUse());
 }
 
-test "add multi sockets" {
+test "add multi sockets, shutdown immediately" {
     const s = try CoreTest.init(.{});
     defer s.deinit();
 
@@ -1762,8 +1762,37 @@ test "add multi sockets" {
 
     try expectEqual(3, s.core._task_queue.len);
     var state_iter = s.core._all_states.iterate();
+    var num_states: usize = 0;
     while (state_iter.next()) |e| {
         const state = CoreTest.SocketState.fromList(e);
         try expectEqual(true, state.is_closed);
+        num_states += 1;
     }
+    try expectEqual(3, num_states);
+}
+
+test "add multi sockets, read all then shudown" {
+    const s = try CoreTest.init(.{});
+    defer s.deinit();
+
+    s.core.addNewSocket(21);
+    s.core.addNewSocket(22);
+    s.core.addNewSocket(23);
+    s.handleEpollEvent(s.newEpollEventFD());
+
+    // handle all actions
+    const task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(task1);
+    try expectEqual(0, s.eventfd.counter);
+
+    s.core.handleTaskQueue();
+    try expectEqual(0, s.core._task_queue.len);
+
+    // do shutdown
+    s.core.shutdown();
+    s.handleEpollEvent(s.newEpollEventFD());
+    s.core.handleTaskQueue();
+
+    // states empty
+    try expectEqual(true, s.core._all_states.isEmpty());
 }

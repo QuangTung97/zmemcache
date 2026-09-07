@@ -93,6 +93,7 @@ pub fn EpollCore(
 
         const Self = @This();
 
+        _io: std.Io,
         _epoll: *EpollType,
         _socket_svc: *SocketSvc,
 
@@ -101,7 +102,8 @@ pub fn EpollCore(
         _max_total_read_before_yield: usize,
 
         _action_queue: ActionQueue,
-        // TODO add mutex
+        _action_queue_mut: std.Io.Mutex,
+        _action_queue_cond: std.Io.Condition,
 
         _task_queue: TaskQueue,
         _yield_queue: TaskQueue,
@@ -123,6 +125,7 @@ pub fn EpollCore(
         };
 
         pub fn init(
+            io: std.Io,
             gpa: Allocator,
             epoll: *EpollType,
             socket_svc: *SocketSvc,
@@ -135,6 +138,7 @@ pub fn EpollCore(
             errdefer gpa.destroy(self);
 
             self.* = .{
+                ._io = io,
                 ._epoll = epoll,
                 ._socket_svc = socket_svc,
 
@@ -142,7 +146,10 @@ pub fn EpollCore(
                 ._max_consecutive_read = config.max_consecutive_read,
                 ._max_total_read_before_yield = config.max_total_read_before_yield,
 
-                ._action_queue = try .initCapacity(gpa, 16), // 2 is sufficient
+                ._action_queue = try .initCapacity(gpa, 64),
+                ._action_queue_mut = .init,
+                ._action_queue_cond = .init,
+
                 ._task_queue = try .initCapacity(gpa, config.max_num_sockets * 2 + 1),
                 ._yield_queue = try .initCapacity(gpa, config.max_num_sockets),
 
@@ -229,9 +236,33 @@ pub fn EpollCore(
         }
 
         fn addActionQueue(self: *Self, action: ActionType) void {
-            // TODO add mutex
+            const is_first = self.addActionQueueLocked(action);
+            if (is_first) {
+                // TODO inc event fd
+            }
+        }
+
+        fn addActionQueueLocked(self: *Self, action: ActionType) bool {
+            self._action_queue_mut.lockUncancelable(self._io);
+            defer self._action_queue_mut.unlock(self._io);
+
+            while (self._action_queue.len >= self._action_queue.buffer.len) {
+                self._action_queue_cond.waitUncancelable(self._io, &self._action_queue_mut);
+            }
+
+            const is_first = self._action_queue.len == 0;
             self._action_queue.pushBackBounded(action) catch unreachable;
-            // TODO inc eventfd
+
+            return is_first;
+        }
+
+        fn popFromActionQueue(self: *Self) ?ActionType {
+            self._action_queue_mut.lockUncancelable(self._io);
+            defer self._action_queue_mut.unlock(self._io);
+
+            defer self._action_queue_cond.signal(self._io);
+
+            return self._action_queue.popFront();
         }
 
         pub fn handleTaskQueue(self: *Self) void {
@@ -350,8 +381,7 @@ pub fn EpollCore(
         }
 
         fn handleTaskEventFD(self: *Self) HandleTaskStatus {
-            // TODO add mutex
-            const null_action = self._action_queue.popFront();
+            const null_action = self.popFromActionQueue();
             const action = if (null_action) |x| x else {
                 // TODO drain eventfd
                 return .Next;
@@ -811,6 +841,7 @@ const CoreTest = struct {
     };
 
     fn init(config: Config) !*Self {
+        const io = std.testing.io;
         const gpa = std.testing.allocator;
 
         const self = try gpa.create(Self);
@@ -823,6 +854,7 @@ const CoreTest = struct {
         };
 
         self.core = try CoreType.init(
+            io,
             gpa,
             &self.epoll,
             &self.socket_svc,

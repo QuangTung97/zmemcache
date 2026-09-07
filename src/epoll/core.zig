@@ -629,6 +629,10 @@ pub fn EpollCore(
             state.all_state_list.remove();
             self._state_alloc.destroy(state);
 
+            // remove from epoll first
+            EpollFuncs.epollRemove(self._epoll, state.socket_fd);
+
+            // then close socket
             SocketFuncs.close(self._socket_svc, state.socket_fd);
 
             _ = self._num_active_conns.fetchSub(1);
@@ -688,7 +692,10 @@ const FakeEpoll = struct {
         self.socket_map.put(fd, data_ptr) catch unreachable;
     }
 
-    pub fn epollRemove(_: *Self, _: u64) void {}
+    pub fn epollRemove(self: *Self, fd: u64) void {
+        const ok = self.socket_map.remove(fd);
+        std.debug.assert(ok);
+    }
 };
 
 // ===========================================================================
@@ -1600,6 +1607,7 @@ test "socket is closed, when reading" {
 
     try expectEqual(0, s.socket_svc.read_map.count());
     try expectEqual(0, s.socket_svc.is_closed_map.count());
+    try expectEqual(0, s.epoll.socket_map.count());
 }
 
 test "read util EAGAIN, then close when writing" {
@@ -1795,4 +1803,5 @@ test "add multi sockets, read all then shudown" {
 
     // states empty
     try expectEqual(true, s.core._all_states.isEmpty());
+    try expectEqual(0, s.epoll.socket_map.count());
 }

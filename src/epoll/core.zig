@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const zutil = @import("zutil");
+const zatomic = zutil.atomic;
 
 const Allocator = std.mem.Allocator;
 
@@ -100,8 +101,8 @@ pub fn EpollCore(
         _all_states: zutil.ListHead,
         _eventfd_state: *SocketState,
 
-        // TODO add padding
-        _num_active_conns: u64 = 0, // TODO use atomic
+        _padding1: [64]u8 = undefined,
+        _num_active_conns: zatomic.Value(u64) = .init(0),
 
         pub fn init(
             gpa: Allocator,
@@ -143,6 +144,7 @@ pub fn EpollCore(
             while (state_it.next()) |e| {
                 const state = SocketState.fromList(e);
                 state.destroy();
+                _ = self._num_active_conns.fetchSub(1);
             }
 
             std.debug.assert(self._all_states.isEmpty());
@@ -268,6 +270,7 @@ pub fn EpollCore(
 
             // add to all states
             self._all_states.pushBack(&conn_state.all_state_list);
+            _ = self._num_active_conns.fetchAdd(1);
 
             // add to epoll
             EpollFuncs.epollAdd(self._epoll, new_conn_fd, conn_state);
@@ -738,7 +741,9 @@ const CoreTest = struct {
         }
 
         var state_iter = self.core._all_states.iterate();
+        var num_states: u64 = 0;
         while (state_iter.next()) |x| {
+            num_states += 1;
             const state = SocketState.fromList(x);
 
             std.debug.assert(state.getHandleBuf().len <= state.read_size);
@@ -757,6 +762,8 @@ const CoreTest = struct {
                 }));
             }
         }
+
+        std.debug.assert(self.core._num_active_conns.load() == num_states);
     }
 
     fn checkOnNextInv(self: *Self, state: *SocketState) void {

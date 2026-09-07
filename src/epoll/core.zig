@@ -20,10 +20,12 @@ pub fn EpollCore(
     FD: type,
     Event: type,
     EpollType: type,
+    EventFdType: type,
     SocketSvc: type,
     CallbackType: type,
     EventFuncs: types.EventFuncs(Event),
     EpollFuncs: types.EpollFuncs(EpollType, Event, FD),
+    EventFdFuncs: types.EventFdFuncs(EventFdType, FD),
     SocketFuncs: types.SocketFuncs(SocketSvc, FD),
     CallbackFuncs: types.CallbackFuncs(CallbackType),
     comptime max_write_queue_len: usize,
@@ -108,6 +110,7 @@ pub fn EpollCore(
 
         _io: std.Io,
         _epoll: *EpollType,
+        _eventfd_svc: *EventFdType,
         _socket_svc: *SocketSvc,
 
         _write_queue_capacity: usize,
@@ -141,6 +144,7 @@ pub fn EpollCore(
             io: std.Io,
             gpa: Allocator,
             epoll: *EpollType,
+            eventfd_svc: *EventFdType,
             socket_svc: *SocketSvc,
             eventfd_num: FD,
             config: Config,
@@ -153,6 +157,7 @@ pub fn EpollCore(
             self.* = .{
                 ._io = io,
                 ._epoll = epoll,
+                ._eventfd_svc = eventfd_svc,
                 ._socket_svc = socket_svc,
 
                 ._write_queue_capacity = config.write_queue_capacity,
@@ -247,10 +252,16 @@ pub fn EpollCore(
             });
         }
 
+        pub fn shutdown(self: *Self) void {
+            self.addActionQueue(.{
+                .Shutdown = .{},
+            });
+        }
+
         fn addActionQueue(self: *Self, action: ActionType) void {
             const is_first = self.addActionQueueLocked(action);
             if (is_first) {
-                // TODO inc event fd
+                EventFdFuncs.inc(self._eventfd_svc, self._eventfd_state.socket_fd);
             }
         }
 
@@ -401,7 +412,7 @@ pub fn EpollCore(
         fn handleTaskEventFD(self: *Self) HandleTaskStatus {
             const null_action = self.popFromActionQueue();
             const action = if (null_action) |x| x else {
-                // TODO drain eventfd
+                EventFdFuncs.drain(self._eventfd_svc, self._eventfd_state.socket_fd);
                 return .Next;
             };
 
@@ -411,7 +422,12 @@ pub fn EpollCore(
                     return .Continue;
                 },
                 .Shutdown => {
-                    @panic("TODO");
+                    var state_iter = self._all_states.iterate();
+                    while (state_iter.next()) |e| {
+                        const state = SocketState.fromList(e);
+                        _ = self.doCloseSocket(state);
+                    }
+                    return .Continue;
                 },
             }
         }
@@ -676,6 +692,34 @@ const FakeEpoll = struct {
 };
 
 // ===========================================================================
+// Fake EventFd
+// ===========================================================================
+
+const FakeEventFd = struct {
+    const Self = @This();
+
+    eventfd: u64,
+    counter: usize,
+
+    pub fn init(num: u64) Self {
+        return .{
+            .eventfd = num,
+            .counter = 0,
+        };
+    }
+
+    pub fn inc(self: *Self, fd: u64) void {
+        std.debug.assert(fd == self.eventfd);
+        self.counter += 1;
+    }
+
+    pub fn drain(self: *Self, fd: u64) void {
+        std.debug.assert(fd == self.eventfd);
+        self.counter = 0;
+    }
+};
+
+// ===========================================================================
 // Fake Socket Svc
 // ===========================================================================
 
@@ -883,6 +927,7 @@ const CoreTest = struct {
 
     const EventFuncs = types.EventFuncs(FakeEvent);
     const EpollFuncs = types.EpollFuncs(FakeEpoll, FakeEvent, u64);
+    const EventFdFuncs = types.EventFdFuncs(FakeEventFd, u64);
     const SocketFuncs = types.SocketFuncs(FakeSocketSvc, u64);
     const CallbackFuncs = types.CallbackFuncs(FakeCallbacks);
 
@@ -890,10 +935,12 @@ const CoreTest = struct {
         u64,
         FakeEvent,
         FakeEpoll,
+        FakeEventFd,
         FakeSocketSvc,
         FakeCallbacks,
         EventFuncs.init(),
         EpollFuncs.init(),
+        EventFdFuncs.init(),
         SocketFuncs.init(),
         CallbackFuncs.init(),
         50,
@@ -903,6 +950,7 @@ const CoreTest = struct {
     const SocketState = CoreType.CoreSocketState;
 
     epoll: FakeEpoll,
+    eventfd: FakeEventFd,
     socket_svc: FakeSocketSvc,
     core: *CoreType,
 
@@ -920,8 +968,11 @@ const CoreTest = struct {
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
 
+        const eventfd_num: u64 = 11;
+
         self.* = .{
             .epoll = FakeEpoll.init(gpa),
+            .eventfd = FakeEventFd.init(eventfd_num),
             .socket_svc = FakeSocketSvc.init(config.socket_send_buffer_size),
             .core = undefined,
         };
@@ -930,8 +981,9 @@ const CoreTest = struct {
             io,
             gpa,
             &self.epoll,
+            &self.eventfd,
             &self.socket_svc,
-            11,
+            eventfd_num,
             .{
                 .max_num_sockets = 3,
                 .write_queue_capacity = config.write_queue_capacity,
@@ -1133,11 +1185,14 @@ const CoreTest = struct {
 
         self.handleEpollEvent(self.newEpollEventFD());
         self.addNewSocket(fd);
+        try expectEqual(1, self.eventfd.counter);
 
         // pop and handle task
         const task = self.popTaskQueue().?;
         try expectEqual(HandleTaskStatus.Continue, self.handleTask(task));
+        try expectEqual(1, self.eventfd.counter);
         try expectEqual(HandleTaskStatus.Next, self.handleTask(task));
+        try expectEqual(0, self.eventfd.counter);
 
         // after
         try expectEqual(0, self.core._action_queue.len);
@@ -1684,4 +1739,31 @@ test "close when writing, with yielded read" {
     try expectEqual(0, state1.callbacks.num_writes);
     try expectEqual(false, s.core._all_states.containsSlow(&state1.all_state_list));
     try expectEqual(1, s.core._state_alloc.getNumInUse());
+}
+
+test "add multi sockets" {
+    const s = try CoreTest.init(.{});
+    defer s.deinit();
+
+    s.core.addNewSocket(21);
+    s.core.addNewSocket(22);
+    s.core.addNewSocket(23);
+    try expectEqual(1, s.eventfd.counter);
+
+    s.core.shutdown();
+    try expectEqual(1, s.eventfd.counter);
+
+    s.handleEpollEvent(s.newEpollEventFD());
+
+    // handle all actions
+    const task1 = s.popTaskQueue().?;
+    s.handleTaskUntilNext(task1);
+    try expectEqual(0, s.eventfd.counter);
+
+    try expectEqual(3, s.core._task_queue.len);
+    var state_iter = s.core._all_states.iterate();
+    while (state_iter.next()) |e| {
+        const state = CoreTest.SocketState.fromList(e);
+        try expectEqual(true, state.is_closed);
+    }
 }

@@ -62,10 +62,19 @@ pub fn SocketFuncs(T: type, FD: type) type {
     };
 }
 
-pub fn EventFdFuncs(FD: type) type {
+pub fn EventFdFuncs(T: type, FD: type) type {
     return struct {
-        drain: fn (fd: FD) void, // TODO use
-        inc: fn (fd: FD) void, // TODO use
+        inc: fn (self: *T, fd: FD) void,
+        drain: fn (self: *T, fd: FD) void,
+
+        const Self = @This();
+
+        pub fn init() Self {
+            return .{
+                .inc = T.inc,
+                .drain = T.drain,
+            };
+        }
     };
 }
 

@@ -91,6 +91,59 @@ pub const EpollService = struct {
     }
 };
 
+pub fn SocketService(comptime max_queue_size: usize) type {
+    return struct {
+        const Self = @This();
+
+        pub fn read(_: *Self, socket_fd: FD, buffer: []u8) types.SocketError!usize {
+            const result = linux.read(socket_fd, buffer.ptr, buffer.len);
+            return returnSizeAndError(result);
+        }
+
+        pub fn write(_: *Self, socket_fd: FD, write_queue: *types.WriteQueue) types.SocketError!usize {
+            std.debug.assert(write_queue.count() > 0);
+
+            const iovec_type = std.posix.iovec_const;
+
+            var iovec_buffer: [max_queue_size]iovec_type = undefined;
+            var iovec_list = std.ArrayList(iovec_type).initBuffer(&iovec_buffer);
+
+            var iter = write_queue.iterator();
+            while (iter.next()) |data| {
+                iovec_list.appendBounded(.{
+                    .base = data.ptr,
+                    .len = data.len,
+                }) catch unreachable;
+            }
+
+            const result = linux.writev(
+                socket_fd,
+                iovec_list.items.ptr,
+                iovec_list.items.len,
+            );
+            return returnSizeAndError(result);
+        }
+
+        pub fn close(_: *Self, socket_fd: FD) void {
+            _ = linux.close(socket_fd);
+        }
+
+        fn returnSizeAndError(result: usize) types.SocketError!usize {
+            if (result == 0) {
+                return types.SocketError.ConnectionError;
+            }
+            const err = linux.errno(result);
+            if (err == .SUCCESS) {
+                return result;
+            }
+            if (err == .AGAIN) {
+                return types.SocketError.EAGAIN;
+            }
+            return types.SocketError.ConnectionError;
+        }
+    };
+}
+
 test "event svc" {
     const funcs = EventFuncs.init();
     _ = funcs;
@@ -110,4 +163,10 @@ test "epoll" {
     var buffer: [16]Event = undefined;
     const events = funcs.epollWait(&epoll, &buffer, false);
     try std.testing.expectEqual(0, events.len);
+}
+
+test "socket service" {
+    _ = types.SocketFuncs(SocketService(16), FD).init();
+
+    std.testing.refAllDecls(SocketService(16));
 }

@@ -203,7 +203,7 @@ pub fn EpollCore(
                 state.is_reading = false;
                 state.is_writing = false;
                 state.reading_yielded = false;
-                self.doDestroySocket(state);
+                _ = self.doCloseSocket(state);
             }
 
             std.debug.assert(self._all_states.isEmpty());

@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 pub fn EpollRoot(
     CallbackType: type,
     comptime max_write_queue_size: usize,
+    comptime epoll_buffer_size: usize,
 ) type {
     return struct {
         const Self = @This();
@@ -85,10 +86,40 @@ pub fn EpollRoot(
             self.core.deinit(gpa);
             gpa.destroy(self);
         }
+
+        pub fn runLoop(self: *Self) void {
+            while (!self.core.shutdownFinished()) {
+                var events_buffer: [epoll_buffer_size]impl.Event = undefined;
+                const epoll_events = self.core.epollWait(&events_buffer);
+
+                self.core.moveFromYieldQueueToTaskQueue();
+
+                for (epoll_events) |event| {
+                    self.core.handleEpollEvent(event);
+                }
+
+                self.core.handleTaskQueue();
+            }
+        }
     };
 }
 
-test "test wiring" {
-    const RootType = EpollRoot(ecore.FakeCallbacks, 16);
+test "test epoll wiring" {
+    const RootType = EpollRoot(
+        ecore.FakeCallbacks,
+        16,
+        32,
+    );
     std.testing.refAllDecls(RootType);
+
+    const gpa = std.testing.allocator;
+    const root = try RootType.init(std.testing.io, gpa, .{
+        .max_consecutive_read = 20,
+        .max_total_read_before_yield = 200,
+        .max_num_sockets = 16,
+    });
+    defer root.deinit(gpa);
+
+    root.core.shutdown();
+    root.runLoop();
 }

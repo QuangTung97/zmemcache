@@ -8,6 +8,7 @@ pub const Event = linux.epoll_event;
 
 pub const EventFuncs = types.EventFuncs(EventService, Event);
 pub const EpollFuncs = types.EpollFuncs(EpollService, Event, FD);
+pub const EventFdFuncs = types.EventFdFuncs(EventFdService, FD);
 
 pub const EventService = struct {
     pub fn hasEpollIn(e: Event) bool {
@@ -91,9 +92,15 @@ pub const EpollService = struct {
     }
 };
 
-pub fn SocketService(comptime max_queue_size: usize) type {
+pub fn SocketService(
+    comptime max_queue_size: usize,
+) type {
     return struct {
         const Self = @This();
+
+        pub fn init() Self {
+            return .{};
+        }
 
         pub fn read(_: *Self, socket_fd: FD, buffer: []u8) types.SocketError!usize {
             const result = linux.read(socket_fd, buffer.ptr, buffer.len);
@@ -231,7 +238,7 @@ test "socket service" {
 }
 
 test "eventfd" {
-    _ = types.EventFdFuncs(EventFdService, FD).init();
+    _ = EventFdFuncs.init();
     std.testing.refAllDecls(EventFdService);
 
     var s = EventFdService.init();

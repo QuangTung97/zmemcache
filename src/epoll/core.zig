@@ -129,10 +129,11 @@ pub fn EpollCore(
         _all_states: zutil.ListHead,
         _eventfd_state: *SocketState,
 
+        _total_num_read: usize = 0,
+        _is_shutdown: bool = false,
+
         _padding1: [64]u8 = undefined,
         _num_active_conns: zatomic.Value(u64) = .init(0),
-
-        _total_num_read: usize = 0,
 
         pub const Config = struct {
             max_num_sockets: usize,
@@ -423,11 +424,15 @@ pub fn EpollCore(
                     return .Continue;
                 },
                 .Shutdown => {
+                    std.debug.assert(!self._is_shutdown);
+
                     var state_iter = self._all_states.iterate();
                     while (state_iter.next()) |e| {
                         const state = SocketState.fromList(e);
                         _ = self.doCloseSocket(state);
                     }
+
+                    self._is_shutdown = true;
                     return .Continue;
                 },
             }
@@ -637,6 +642,13 @@ pub fn EpollCore(
             SocketFuncs.close(self._socket_svc, state.socket_fd);
 
             _ = self._num_active_conns.fetchSub(1);
+        }
+
+        pub fn shutdownFinished(self: *Self) bool {
+            if (!self._is_shutdown) {
+                return false;
+            }
+            return self._all_states.isEmpty();
         }
     };
 }
@@ -849,7 +861,7 @@ const FakeSocketSvc = struct {
 // Fake Callbacks
 // ===========================================================================
 
-const FakeCallbacks = struct {
+pub const FakeCallbacks = struct {
     const Self = @This();
     const ReadData = std.ArrayList(u8);
     const State = enum { Step1, Step2, Step3 };
@@ -1769,6 +1781,7 @@ test "add multi sockets, shutdown immediately" {
     const task1 = s.popTaskQueue().?;
     s.handleTaskUntilNext(task1);
     try expectEqual(0, s.eventfd.counter);
+    try expectEqual(false, s.core.shutdownFinished());
 
     try expectEqual(3, s.core._task_queue.len);
     var state_iter = s.core._all_states.iterate();
@@ -1784,6 +1797,7 @@ test "add multi sockets, shutdown immediately" {
 test "add multi sockets, read all then shudown" {
     const s = try CoreTest.init(.{});
     defer s.deinit();
+    try expectEqual(false, s.core.shutdownFinished());
 
     s.core.addNewSocket(21);
     s.core.addNewSocket(22);
@@ -1797,11 +1811,14 @@ test "add multi sockets, read all then shudown" {
 
     s.core.handleTaskQueue();
     try expectEqual(0, s.core._task_queue.len);
+    try expectEqual(false, s.core.shutdownFinished());
 
     // do shutdown
     s.core.shutdown();
     s.handleEpollEvent(s.newEpollEventFD());
     s.core.handleTaskQueue();
+    try expectEqual(true, s.core._is_shutdown);
+    try expectEqual(true, s.core.shutdownFinished());
 
     // states empty
     try expectEqual(true, s.core._all_states.isEmpty());

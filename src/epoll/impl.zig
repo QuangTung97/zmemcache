@@ -125,7 +125,10 @@ pub fn SocketService(comptime max_queue_size: usize) type {
         }
 
         pub fn close(_: *Self, socket_fd: FD) void {
-            _ = linux.close(socket_fd);
+            const result = linux.close(socket_fd);
+            if (linux.errno(result) != .SUCCESS) {
+                @panic("Failed to close socket");
+            }
         }
 
         fn returnSizeAndError(result: usize) types.SocketError!usize {
@@ -143,6 +146,63 @@ pub fn SocketService(comptime max_queue_size: usize) type {
         }
     };
 }
+
+pub const EventFdService = struct {
+    const Self = @This();
+
+    pub fn init() Self {
+        return .{};
+    }
+
+    pub fn new_eventfd(_: *Self) FD {
+        const result = linux.eventfd(0, linux.EFD.NONBLOCK | linux.EFD.CLOEXEC);
+        if (linux.errno(result) != .SUCCESS) {
+            @panic("Failed to create eventfd");
+        }
+        return @intCast(result);
+    }
+
+    pub fn close_eventfd(_: *Self, fd: FD) void {
+        const result = linux.close(fd);
+        if (linux.errno(result) != .SUCCESS) {
+            @panic("Failed to close");
+        }
+    }
+
+    pub fn inc(_: *Self, fd: FD) void {
+        var buffer: [@sizeOf(u64)]u8 = undefined;
+        std.mem.writeInt(u64, &buffer, 1, .native);
+
+        const result = linux.write(fd, &buffer, buffer.len);
+        if (linux.errno(result) != .SUCCESS) {
+            @panic("Failed to increase eventfd");
+        }
+    }
+
+    pub fn drain(_: *Self, fd: FD) void {
+        while (true) {
+            const result = doRead(fd);
+            switch (result) {
+                .Continue => continue,
+                .EAGAIN => return,
+            }
+        }
+    }
+
+    fn doRead(fd: FD) enum { Continue, EAGAIN } {
+        var buffer: [@sizeOf(u64)]u8 = undefined;
+        const result = linux.read(fd, &buffer, buffer.len);
+
+        const err = linux.errno(result);
+        if (err == .SUCCESS) {
+            return .Continue;
+        }
+        if (err == .AGAIN) {
+            return .EAGAIN;
+        }
+        @panic("Failed to drain eventfd");
+    }
+};
 
 test "event svc" {
     const funcs = EventFuncs.init();
@@ -167,6 +227,21 @@ test "epoll" {
 
 test "socket service" {
     _ = types.SocketFuncs(SocketService(16), FD).init();
-
     std.testing.refAllDecls(SocketService(16));
+}
+
+test "eventfd" {
+    _ = types.EventFdFuncs(EventFdService, FD).init();
+    std.testing.refAllDecls(EventFdService);
+
+    var s = EventFdService.init();
+
+    const eventfd = s.new_eventfd();
+    defer s.close_eventfd(eventfd);
+
+    s.inc(eventfd);
+    s.inc(eventfd);
+    s.inc(eventfd);
+
+    s.drain(eventfd);
 }

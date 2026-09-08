@@ -32,10 +32,10 @@ pub fn EpollRoot(
             max_write_queue_size,
         );
 
-        epoll: impl.EpollService,
         eventfd_svc: impl.EventFdService,
         eventfd_num: FD,
         socket_svc: SocketSvc,
+        epoll: impl.EpollService,
         core: *CoreType,
 
         pub const Config = struct {
@@ -52,10 +52,10 @@ pub fn EpollRoot(
             const s = try gpa.create(Self);
 
             s.* = .{
-                .epoll = impl.EpollService.init(),
                 .eventfd_svc = impl.EventFdService.init(),
                 .eventfd_num = undefined,
                 .socket_svc = SocketSvc.init(),
+                .epoll = impl.EpollService.init(),
                 .core = undefined,
             };
 
@@ -80,10 +80,9 @@ pub fn EpollRoot(
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
-            self.eventfd_svc.close_eventfd(self.eventfd_num);
-
-            self.epoll.deinit();
             self.core.deinit(gpa);
+            self.eventfd_svc.close_eventfd(self.eventfd_num);
+            self.epoll.deinit();
             gpa.destroy(self);
         }
 

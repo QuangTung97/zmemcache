@@ -191,6 +191,9 @@ pub fn EpollCore(
                 .all_state_list = undefined,
             };
 
+            // add eventfd to epoll
+            EpollFuncs.epollAdd(self._epoll, eventfd_num, self._eventfd_state);
+
             return self;
         }
 
@@ -208,6 +211,9 @@ pub fn EpollCore(
 
             std.debug.assert(self._all_states.isEmpty());
             std.debug.assert(self._state_alloc.getNumInUse() == 1);
+
+            // remove eventfd from epoll
+            EpollFuncs.epollRemove(self._epoll, self._eventfd_state.socket_fd);
 
             self._state_alloc.deinit(gpa);
             self._yield_queue.deinit(gpa);
@@ -1022,6 +1028,8 @@ const CoreTest = struct {
 
         self.core.deinit(gpa);
         self.socket_svc.deinit();
+
+        std.debug.assert(self.epoll.socket_map.count() == 0);
         self.epoll.deinit();
 
         gpa.destroy(self);
@@ -1239,6 +1247,9 @@ test "handle epoll event" {
     const s = try CoreTest.init(.{});
     defer s.deinit();
 
+    // check epoll register
+    try expectEqual(true, s.epoll.socket_map.contains(s.core._eventfd_state.socket_fd));
+
     s.handleEpollEvent(s.newEpollEventFD());
     try expectEqual(1, s.core._task_queue.len);
 
@@ -1260,7 +1271,7 @@ test "handle epoll event" {
     try expectEqual(1, s.core._task_queue.len);
     try expectEqual(0, s.core._action_queue.len);
     // check socket map
-    try expectEqual(1, s.epoll.socket_map.count());
+    try expectEqual(2, s.epoll.socket_map.count());
     try expectEqual(true, s.epoll.socket_map.contains(socket_fd1));
 
     // stub read data
@@ -1621,7 +1632,7 @@ test "socket is closed, when reading" {
 
     try expectEqual(0, s.socket_svc.read_map.count());
     try expectEqual(0, s.socket_svc.is_closed_map.count());
-    try expectEqual(0, s.epoll.socket_map.count());
+    try expectEqual(1, s.epoll.socket_map.count());
 }
 
 test "read util EAGAIN, then close when writing" {
@@ -1822,5 +1833,5 @@ test "add multi sockets, read all then shudown" {
 
     // states empty
     try expectEqual(true, s.core._all_states.isEmpty());
-    try expectEqual(0, s.epoll.socket_map.count());
+    try expectEqual(1, s.epoll.socket_map.count());
 }

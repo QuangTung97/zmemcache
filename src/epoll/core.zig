@@ -521,6 +521,9 @@ pub fn EpollCore(
                     state.write_queue_full = true;
                     return self.doReadReturnNext(state);
                 },
+                .Error => {
+                    @panic("TODO");
+                },
             }
         }
 

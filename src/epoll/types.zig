@@ -132,6 +132,7 @@ pub const OnReadResult = union(enum) {
         next_read_size: usize,
     },
     WaitWriteQueue: struct {},
+    Error: struct {},
 
     pub fn initOk(n: usize) Self {
         return .{
